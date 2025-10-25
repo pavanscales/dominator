@@ -1,0 +1,8 @@
+# Build output
+/dist/
+
+# Node modules
+/node_modules/
+
+# Optional scripts or temp
+/scripts/
