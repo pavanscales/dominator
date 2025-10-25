@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dominator Demo</title>
+</head>
+<body>
+  <div id="app"></div>
+
+  <script type="module">
+    import Dominator from './dist/index.js';
+
+    const app = document.getElementById('app');
+
+    Dominator.initDominator(app);
+
+    const v = Dominator.h('div', { id: 'hello' }, 'Hello Dominator!');
+    Dominator.mount(v, app);
+  </script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+{
+  "name": "dominator",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pavanscales/dominator.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/pavanscales/dominator/issues"
+  },
+  "homepage": "https://github.com/pavanscales/dominator#readme",
+  "dependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "eslint": "^9.38.0",
+    "prettier": "^3.6.2"
+  }
+}
