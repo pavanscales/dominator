@@ -4,64 +4,30 @@
     <div class="tools">
       <div class="tool-group">
         <label>Color</label>
-        <input type="color" value={currentColor()} onInput={e => currentColor.set(e.target.value)} title="Pick Color" />
+        <input type="color" value="{currentColor()}" oninput="{e => currentColor.set(e.target.value)}" title="Pick Color" />
       </div>
       <div class="tool-group">
-        <button onClick={e => tool.set('draw')} class={tool() === 'draw' ? 'active' : ''}>
-          Draw
-        </button>
-        <button onClick={e => tool.set('erase')} class={tool() === 'erase' ? 'active' : ''}>
-          Erase
-        </button>
+        <button onclick="{() => tool.set('draw')}" class="{tool() === 'draw' ? 'active' : ''}">Draw</button>
+        <button onclick="{() => tool.set('erase')}" class="{tool() === 'erase' ? 'active' : ''}">Erase</button>
       </div>
       <div class="tool-group">
-        <button onClick={undo} disabled={history().length === 0} title="Undo (Ctrl+Z)">Undo</button>
-        <button onClick={redo} disabled={redoStack().length === 0} title="Redo (Ctrl+Y)">Redo</button>
+        <button onclick="{undo}" disabled="{historyLength() === 0}" title="Undo (Ctrl+Z)">Undo</button>
+        <button onclick="{redo}" disabled="{redoLength() === 0}" title="Redo (Ctrl+Y)">Redo</button>
       </div>
     </div>
   </header>
-
   <main>
     <div class="grid-container">
-      <div class="grid" 
-        onMousedown={e => { if (e.button === 0) startDrawing(e); }}
-        onMousemove={e => ifDrawing(e)}
-        onMouseup={stopDrawing}
-        onMouseleave={stopDrawing}>
-        {Array.from({length: GRID_SIZE * GRID_SIZE}, (_, i) => {
-          const x = i % GRID_SIZE;
-          const y = Math.floor(i / GRID_SIZE);
-          const key = `${x}-${y}`;
-          const color = pixels[key] || '#ffffff';
-          return <div 
-            class="pixel" 
-            style:backgroundColor={color}
-            data-x={x} 
-            data-y={y}
-          />;
-        })}
+      <div class="grid">
       </div>
     </div>
-
     <aside class="sidebar">
       <section class="stats-section">
-        <h3>History & Stats</h3>
-        <p class="stats-summary">Pixels colored: <strong>{Object.keys(pixels()).length}</strong></p>
-        
+        <h3>History &amp; Stats</h3>
         <h3>Palette Usage</h3>
-        <div class="color-usage">
-          {colorCounts.map(([col, cnt]) => (
-            <div class="usage-item" style:--color={col}>
-              <div class="color-swatch"></div>
-              <span class="color-code">{col}</span>
-              <span class="color-count">{cnt}</span>
-            </div>
-          ))}
-        </div>
       </section>
-      
       <div class="sidebar-footer">
-        <button class="export-btn" onClick={exportToPNG}>Export Artifact</button>
+        <button class="export-btn" onclick="{exportToPNG}">Export Artifact</button>
       </div>
     </aside>
   </main>

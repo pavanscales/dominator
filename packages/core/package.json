@@ -1,11 +1,38 @@
 {
     "name": "@dominator/core",
-    "version": "0.0.1",
+    "version": "0.1.0",
     "type": "module",
-    "main": "./src/index.ts",
-    "scripts": {
-        "build": "tsc"
+    "description": "Compiler-based reactive UI framework with zero virtual DOM",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "import": "./dist/index.js",
+            "types": "./dist/index.d.ts"
+        },
+        "./compiler": {
+            "import": "./dist/compiler/vite-plugin.js",
+            "types": "./dist/compiler/vite-plugin.d.ts"
+        }
     },
+    "files": [
+        "dist"
+    ],
+    "sideEffects": false,
+    "scripts": {
+        "build": "tsc",
+        "typecheck": "tsc --noEmit",
+        "prepublishOnly": "pnpm run build"
+    },
+    "keywords": [
+        "framework",
+        "reactive",
+        "signals",
+        "compiler",
+        "virtual-dom",
+        "SSA"
+    ],
+    "license": "MIT",
     "dependencies": {},
     "devDependencies": {
         "typescript": "^5.5.0"

@@ -9,27 +9,23 @@
     --accents-6: #999999;
     --accents-7: #eaeaea;
     --accents-8: #fafafa;
-    --geist-error: #ee0000;
-    --geist-success: #0070f3;
-    --geist-warning: #f5a623;
-    --portal-border: var(--accents-2);
 }
 
 body {
     margin: 0;
     background-color: var(--background);
     color: var(--foreground);
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
     overflow: hidden;
 }
+
+* { box-sizing: border-box; }
 
 .pixel-canvas-app {
     display: flex;
     flex-direction: column;
     height: 100vh;
-    box-sizing: border-box;
 }
 
 header {
@@ -41,7 +37,6 @@ header {
     border-bottom: 1px solid var(--accents-2);
     background: rgba(0, 0, 0, 0.8);
     backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
     position: sticky;
     top: 0;
     z-index: 100;
@@ -53,7 +48,6 @@ header h1 {
     font-weight: 600;
     letter-spacing: -0.02em;
     text-transform: uppercase;
-    color: var(--foreground);
 }
 
 .tools {
@@ -83,7 +77,6 @@ header h1 {
 
 input[type="color"] {
     appearance: none;
-    -webkit-appearance: none;
     border: none;
     width: 20px;
     height: 20px;
@@ -92,14 +85,8 @@ input[type="color"] {
     padding: 0;
 }
 
-input[type="color"]::-webkit-color-swatch-wrapper {
-    padding: 0;
-}
-
-input[type="color"]::-webkit-color-swatch {
-    border: 1px solid var(--accents-3);
-    border-radius: 4px;
-}
+input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+input[type="color"]::-webkit-color-swatch { border: 1px solid var(--accents-3); border-radius: 4px; }
 
 button {
     background: var(--background);
@@ -111,7 +98,6 @@ button {
     cursor: pointer;
     font-weight: 500;
     font-size: 13px;
-    transition: all 0.15s ease;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -138,7 +124,6 @@ main {
     display: flex;
     flex: 1;
     min-height: 0;
-    background: #000;
 }
 
 .grid-container {
@@ -165,17 +150,18 @@ main {
     box-shadow: 0 0 0 1px var(--accents-2), 0 30px 60px rgba(0, 0, 0, 0.5);
     image-rendering: pixelated;
     user-select: none;
+    contain: strict;
 }
 
 .pixel {
     width: 100%;
     height: 100%;
+    contain: strict;
 }
 
 .pixel:hover {
     outline: 1px solid var(--accents-4);
     z-index: 10;
-    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.1);
 }
 
 .sidebar {
@@ -239,7 +225,7 @@ main {
 }
 
 .color-code {
-    font-family: 'Geist Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-family: 'Geist Mono', monospace;
     font-size: 11px;
     flex: 1;
     color: var(--accents-5);
@@ -271,21 +257,7 @@ main {
     color: var(--foreground);
 }
 
-/* Custom Scrollbar */
-::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-}
-
-::-webkit-scrollbar-track {
-    background: var(--background);
-}
-
-::-webkit-scrollbar-thumb {
-    background: var(--accents-2);
-    border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: var(--accents-3);
-}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--background); }
+::-webkit-scrollbar-thumb { background: var(--accents-2); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accents-3); }

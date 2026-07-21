@@ -1,7 +1,9 @@
 # Build output
 /dist/
 /packages/*/dist/
-/packages/todo-example/src/generated/
+
+# Generated files (compiler output)
+/packages/*/src/generated/
 
 # Node modules
 node_modules/
@@ -10,3 +12,17 @@ node_modules/
 # OS files
 .DS_Store
 Thumbs.db
+Desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test output
+coverage/
+
+# Lock artifacts
+nul
+pnpm-lock.yaml

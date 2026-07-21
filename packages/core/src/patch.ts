@@ -1,8 +1,10 @@
-import { VNode } from './vnode';
-import { mount } from './mount';
-import { addEventListener } from './events';
+import { VNode, VNodeProps } from './vnode';
+import { mount, _applyProps } from './mount';
 
-export const patch = (el: Node, oldVNode: VNode | string | null, newVNode: VNode | string | null) => {
+const _isEventHandler = (key: string): boolean =>
+    key.length > 2 && key.charCodeAt(0) === 111 && key.charCodeAt(1) === 110;
+
+export const patch = (el: Node, oldVNode: VNode | string | null, newVNode: VNode | string | null): void => {
     if (oldVNode === newVNode) return;
 
     if (newVNode === null) {
@@ -27,46 +29,50 @@ export const patch = (el: Node, oldVNode: VNode | string | null, newVNode: VNode
     const domEl = el as HTMLElement;
     newVNode.el = domEl;
 
-    // Patch props
-    const oldProps = oldVNode.props || {};
-    const newProps = newVNode.props || {};
+    const oldProps = oldVNode.props;
+    const newProps = newVNode.props;
 
-    for (const key in newProps) {
-        if (newProps[key] !== oldProps[key]) {
-            if (key.startsWith('on')) {
-                addEventListener(domEl, key.slice(2).toLowerCase(), newProps[key]);
-            } else {
-                (domEl as any)[key] = newProps[key];
+    if (newProps) {
+        _applyProps(domEl, newProps, oldProps);
+    }
+
+    if (oldProps) {
+        const oldKeys = Object.keys(oldProps);
+        for (let i = 0; i < oldKeys.length; i++) {
+            const key = oldKeys[i]!;
+            if (!newProps || !(key in newProps)) {
+                if (!_isEventHandler(key)) {
+                    domEl.removeAttribute(key);
+                }
             }
         }
     }
 
-    for (const key in oldProps) {
-        if (!(key in newProps)) {
-            if (!key.startsWith('on')) {
-                (domEl as any)[key] = null;
-            }
-        }
-    }
-
-    // Patch children (simple diff)
-    patchChildren(domEl, oldVNode.children || [], newVNode.children || []);
+    patchChildren(domEl, oldVNode.children, newVNode.children);
 };
 
-function patchChildren(el: HTMLElement, oldCh: (VNode | string)[], newCh: (VNode | string)[]) {
-    const commonLen = Math.min(oldCh.length, newCh.length);
+function patchChildren(
+    el: HTMLElement,
+    oldCh: (VNode | string)[] | null,
+    newCh: (VNode | string)[] | null
+): void {
+    const oLen = oldCh ? oldCh.length : 0;
+    const nLen = newCh ? newCh.length : 0;
+    const minLen = oLen < nLen ? oLen : nLen;
 
-    for (let i = 0; i < commonLen; i++) {
-        patch(el.childNodes[i], oldCh[i], newCh[i]);
+    for (let i = 0; i < minLen; i++) {
+        patch(el.childNodes[i]!, oldCh![i], newCh![i]);
     }
 
-    if (newCh.length > oldCh.length) {
-        for (let i = commonLen; i < newCh.length; i++) {
-            el.appendChild(mount(newCh[i]));
+    if (nLen > oLen) {
+        const frag = document.createDocumentFragment();
+        for (let i = oLen; i < nLen; i++) {
+            frag.appendChild(mount(newCh![i]!));
         }
-    } else if (oldCh.length > newCh.length) {
-        for (let i = oldCh.length - 1; i >= commonLen; i--) {
-            el.removeChild(el.childNodes[i]);
+        el.appendChild(frag);
+    } else if (oLen > nLen) {
+        for (let i = oLen - 1; i >= nLen; i--) {
+            el.removeChild(el.childNodes[i]!);
         }
     }
 }

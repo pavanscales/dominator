@@ -1,17 +1,6 @@
-
-
 export type ASTNodeType =
-    | 'Program'
-    | 'Element'
-    | 'Text'
-    | 'Expression'
-    | 'Attribute'
-    | 'Component'
-    | 'Fragment'
-    | 'If'
-    | 'Each'
-    | 'Await'
-    | 'Else';
+    | 'Program' | 'Element' | 'Text' | 'Expression' | 'Attribute'
+    | 'Component' | 'Fragment' | 'If' | 'Each' | 'Await' | 'Else';
 
 export interface SourceLocation {
     start: { line: number; column: number };
@@ -21,12 +10,12 @@ export interface SourceLocation {
 export interface ASTNode {
     type: ASTNodeType;
     tag?: string | Function;
-    attributes?: Record<string, any>;
+    attributes?: Record<string, string | boolean>;
     children?: ASTNode[];
     value?: string | number;
     expression?: string;
-    context?: string; // for 'each' blocks (e.g., 'item' in 'each items as item')
-    else?: ASTNode;   // for if/else or await/catch
+    context?: string;
+    else?: ASTNode;
     isStatic?: boolean;
     loc?: SourceLocation;
 }
@@ -37,346 +26,310 @@ interface Token {
     loc: SourceLocation;
 }
 
+function isAlpha(c: number): boolean {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
+function isAlphaNum(c: number): boolean {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
+function isAlphaNumUnder(c: number): boolean {
+    return c === 95 || isAlphaNum(c);
+}
+
+function isAlphaNumUnderDash(c: number): boolean {
+    return c === 45 || isAlphaNumUnder(c);
+}
+
+function isAlphaNumUnderColonDash(c: number): boolean {
+    return c === 58 || c === 45 || isAlphaNumUnder(c);
+}
+
+function isWhitespace(c: number): boolean {
+    return c === 32 || c === 9 || c === 10 || c === 13;
+}
 
 class Tokenizer {
-    private source: string;
-    private pos = 0;
-    private line = 1;
-    private column = 1;
+    private _src: string;
+    private _len: number;
+    private _pos = 0;
+    private _line = 1;
+    private _col = 1;
+    private _tokens: Token[];
+    private _tokenCount = 0;
 
     constructor(source: string) {
-        this.source = source.trim();
-    }
-
-    peek(): string {
-        return this.source[this.pos] || '';
-    }
-
-    advance(): string {
-        const char = this.source[this.pos++];
-        if (char === '\n') {
-            this.line++;
-            this.column = 1;
-        } else {
-            this.column++;
-        }
-        return char;
-    }
-
-    skipWhitespace(): void {
-        while (this.pos < this.source.length && /\s/.test(this.peek())) {
-            this.advance();
-        }
-    }
-
-    getLocation(): SourceLocation {
-        return {
-            start: { line: this.line, column: this.column },
-            end: { line: this.line, column: this.column },
-        };
+        this._src = source.trim();
+        this._len = this._src.length;
+        this._tokens = new Array(Math.max(16, (this._len >> 2) + 8));
     }
 
     tokenize(): Token[] {
-        const tokens: Token[] = [];
-        while (this.pos < this.source.length) {
-            this.skipWhitespace();
-
-            if (this.peek() === '<') {
-                if (this.source[this.pos + 1] === '/') {
-                    tokens.push(this.readCloseTag());
+        while (this._pos < this._len) {
+            this._skipWs();
+            const c = this._src.charCodeAt(this._pos);
+            if (c === 60) {
+                if (this._pos + 1 < this._len && this._src.charCodeAt(this._pos + 1) === 47) {
+                    this._pushToken(this._readCloseTag());
                 } else {
-                    tokens.push(this.readOpenTag());
+                    this._pushToken(this._readOpenTag());
                 }
-            } else if (this.peek() === '{') {
-                const charAfter = this.source[this.pos + 1];
-                if (charAfter === '#' || charAfter === '/' || charAfter === ':') {
-                    tokens.push(this.readBlockToken());
+            } else if (c === 123) {
+                const next = this._pos + 1 < this._len ? this._src.charCodeAt(this._pos + 1) : -1;
+                if (next === 35 || next === 47 || next === 58) {
+                    this._pushToken(this._readBlockToken());
                 } else {
-                    tokens.push(this.readExpression());
+                    this._pushToken(this._readExpression());
                 }
             } else {
-                tokens.push(this.readText());
+                this._pushToken(this._readText());
             }
         }
-
-        tokens.push({ type: 'eof', value: '', loc: this.getLocation() });
-        return tokens;
+        this._pushToken({ type: 'eof', value: '', loc: this._loc() });
+        return this._tokens.slice(0, this._tokenCount);
     }
 
-    private readOpenTag(): Token {
-        const loc = this.getLocation();
-        this.advance(); // '<'
-        this.skipWhitespace();
-
-        let tagName = '';
-        while (this.peek() && /[a-zA-Z0-9_-]/.test(this.peek())) {
-            tagName += this.advance();
+    private _pushToken(t: Token): void {
+        if (this._tokenCount < this._tokens.length) {
+            this._tokens[this._tokenCount] = t;
+        } else {
+            this._tokens.push(t);
         }
+        this._tokenCount++;
+    }
 
-        this.skipWhitespace();
+    private _loc(): SourceLocation {
+        return { start: { line: this._line, column: this._col }, end: { line: this._line, column: this._col } };
+    }
 
-        const attributes: Record<string, any> = {};
-        while (this.peek() && this.peek() !== '>' && this.peek() !== '/') {
-            const attr = this.readAttribute();
-            attributes[attr.name] = attr.value;
-            this.skipWhitespace();
+    private _skipWs(): void {
+        while (this._pos < this._len && isWhitespace(this._src.charCodeAt(this._pos))) {
+            this._advance();
         }
+    }
 
+    private _advance(): string {
+        const ch = this._src[this._pos++];
+        if (ch === '\n') { this._line++; this._col = 1; } else { this._col++; }
+        return ch;
+    }
+
+    private _readOpenTag(): Token {
+        const loc = this._loc();
+        this._advance();
+        this._skipWs();
+        let nameStart = this._pos;
+        while (this._pos < this._len && isAlphaNumUnderDash(this._src.charCodeAt(this._pos))) { this._pos++; }
+        const tagName = this._src.slice(nameStart, this._pos);
+        this._col += this._pos - nameStart;
+        this._skipWs();
+        const attrs: Record<string, string | boolean> = {};
+        while (this._pos < this._len) {
+            const c = this._src.charCodeAt(this._pos);
+            if (c === 62 || c === 47) break;
+            const attr = this._readAttribute();
+            attrs[attr.name] = attr.value;
+            this._skipWs();
+        }
         let type: 'open' | 'selfClose' = 'open';
-        if (this.peek() === '/') {
-            this.advance();
-            type = 'selfClose';
-        }
-
-        if (this.peek() === '>') this.advance();
-
-        return {
-            type,
-            value: JSON.stringify({ tag: tagName, attributes }),
-            loc,
-        };
+        if (this._pos < this._len && this._src.charCodeAt(this._pos) === 47) { this._advance(); type = 'selfClose'; }
+        if (this._pos < this._len && this._src.charCodeAt(this._pos) === 62) { this._advance(); }
+        return { type, value: JSON.stringify({ tag: tagName, attributes: attrs }), loc };
     }
 
-    private readCloseTag(): Token {
-        const loc = this.getLocation();
-        this.advance(); // '<'
-        this.advance(); // '/'
-
-        let tagName = '';
-        while (this.peek() && this.peek() !== '>') {
-            tagName += this.advance();
-        }
-
-        if (this.peek() === '>') this.advance();
-
-        return { type: 'close', value: tagName.trim(), loc };
+    private _readCloseTag(): Token {
+        const loc = this._loc();
+        this._advance();
+        this._advance();
+        let start = this._pos;
+        while (this._pos < this._len && this._src.charCodeAt(this._pos) !== 62) { this._pos++; }
+        const name = this._src.slice(start, this._pos).trim();
+        this._col += this._pos - start;
+        if (this._pos < this._len) this._advance();
+        return { type: 'close', value: name, loc };
     }
 
-    private readAttribute(): { name: string; value: any } {
-        let name = '';
-        while (this.peek() && /[a-zA-Z0-9_:-]/.test(this.peek())) name += this.advance();
-
-        this.skipWhitespace();
-
-        if (this.peek() !== '=') return { name, value: true };
-        this.advance();
-        this.skipWhitespace();
-
-        if (this.peek() === '"' || this.peek() === "'") {
-            const quote = this.advance();
-            let value = '';
-            while (this.peek() && this.peek() !== quote) value += this.advance();
-            this.advance();
-            return { name, value };
+    private _readAttribute(): { name: string; value: string | boolean } {
+        let start = this._pos;
+        while (this._pos < this._len && isAlphaNumUnderColonDash(this._src.charCodeAt(this._pos))) { this._pos++; }
+        const name = this._src.slice(start, this._pos);
+        this._col += this._pos - start;
+        this._skipWs();
+        if (this._pos >= this._len || this._src.charCodeAt(this._pos) !== 61) { return { name, value: true }; }
+        this._advance();
+        this._skipWs();
+        const c = this._src.charCodeAt(this._pos);
+        if (c === 34 || c === 39) {
+            const quote = this._advance();
+            start = this._pos;
+            while (this._pos < this._len && this._src.charCodeAt(this._pos) !== c) { this._pos++; }
+            const val = this._src.slice(start, this._pos);
+            this._col += this._pos - start;
+            if (this._pos < this._len && this._src.charCodeAt(this._pos) === c) this._advance();
+            return { name, value: val };
         }
-
-        if (this.peek() === '{') {
-            this.advance();
-            let expr = '';
+        if (c === 123) {
+            this._advance();
+            start = this._pos;
             let depth = 1;
-            while (depth > 0) {
-                const char = this.advance();
-                if (char === '{') depth++;
-                if (char === '}') depth--;
-                if (depth > 0) expr += char;
+            while (depth > 0 && this._pos < this._len) {
+                const ch = this._src.charCodeAt(this._pos);
+                if (ch === 123) depth++; else if (ch === 125) depth--;
+                this._pos++;
             }
+            this._col += this._pos - start;
+            const expr = this._src.slice(start, this._pos - 1);
             return { name, value: `{${expr}}` };
         }
-
-        let value = '';
-        while (this.peek() && /[a-zA-Z0-9_]/.test(this.peek())) value += this.advance();
-        return { name, value };
+        start = this._pos;
+        while (this._pos < this._len && isAlphaNumUnder(this._src.charCodeAt(this._pos))) { this._pos++; }
+        const val = this._src.slice(start, this._pos);
+        this._col += this._pos - start;
+        return { name, value: val };
     }
 
-    private readExpression(): Token {
-        const loc = this.getLocation();
-        this.advance(); // '{'
-
-        let expr = '';
+    private _readExpression(): Token {
+        const loc = this._loc();
+        this._advance();
+        const start = this._pos;
         let depth = 1;
-        while (depth > 0 && this.pos < this.source.length) {
-            const char = this.advance();
-            if (char === '{') depth++;
-            if (char === '}') depth--;
-            if (depth > 0) expr += char;
+        while (depth > 0 && this._pos < this._len) {
+            const c = this._src.charCodeAt(this._pos);
+            if (c === 123) depth++; else if (c === 125) depth--;
+            this._pos++;
         }
-
-        return { type: 'expr', value: expr.trim(), loc };
+        this._col += this._pos - start;
+        return { type: 'expr', value: this._src.slice(start, this._pos - 1).trim(), loc };
     }
 
-    private readText(): Token {
-        const loc = this.getLocation();
-        let text = '';
-        while (this.peek() && this.peek() !== '<' && this.peek() !== '{') text += this.advance();
-        return { type: 'text', value: text.trim(), loc };
+    private _readText(): Token {
+        const loc = this._loc();
+        const start = this._pos;
+        while (this._pos < this._len) {
+            const c = this._src.charCodeAt(this._pos);
+            if (c === 60 || c === 123) break;
+            this._pos++;
+        }
+        this._col += this._pos - start;
+        return { type: 'text', value: this._src.slice(start, this._pos).trim(), loc };
     }
 
-    private readBlockToken(): Token {
-        const loc = this.getLocation();
-        this.advance(); // '{'
-        const typeChar = this.advance(); // '#', '/', or ':'
-
+    private _readBlockToken(): Token {
+        const loc = this._loc();
+        this._advance();
+        const typeChar = this._advance();
         let type: 'blockOpen' | 'blockClose' | 'blockCont';
         if (typeChar === '#') type = 'blockOpen';
         else if (typeChar === '/') type = 'blockClose';
         else type = 'blockCont';
-
-        let content = '';
-        while (this.peek() && this.peek() !== '}') {
-            content += this.advance();
-        }
-
-        if (this.peek() === '}') this.advance();
-
-        return { type, value: content.trim(), loc };
+        const start = this._pos;
+        while (this._pos < this._len && this._src.charCodeAt(this._pos) !== 125) { this._pos++; }
+        this._col += this._pos - start;
+        const content = this._src.slice(start, this._pos).trim();
+        if (this._pos < this._len) this._advance();
+        return { type, value: content, loc };
     }
 }
 
 export class Parser {
-    private tokens: Token[] = [];
-    private pos = 0;
+    private _tokens: Token[] = [];
+    private _pos = 0;
 
     parse(source: string): ASTNode {
         const tokenizer = new Tokenizer(source);
-        this.tokens = tokenizer.tokenize();
-        this.pos = 0;
-
-        const children = this.parseChildren();
+        this._tokens = tokenizer.tokenize();
+        this._pos = 0;
+        const children = this._parseChildren();
         return { type: 'Program', children };
     }
 
-    private current(): Token {
-        return this.tokens[this.pos];
-    }
+    private _current(): Token { return this._tokens[this._pos]!; }
+    private _advance(): Token { return this._tokens[this._pos++]!; }
 
-    private advance(): Token {
-        return this.tokens[this.pos++];
-    }
-
-    private parseChildren(): ASTNode[] {
+    private _parseChildren(): ASTNode[] {
         const children: ASTNode[] = [];
-        while (this.current() && this.current().type !== 'close' && this.current().type !== 'blockClose' && this.current().type !== 'blockCont' && this.current().type !== 'eof') {
-            const node = this.parseNode();
+        while (true) {
+            const t = this._current();
+            if (!t || t.type === 'close' || t.type === 'blockClose' || t.type === 'blockCont' || t.type === 'eof') break;
+            const node = this._parseNode();
             if (node) children.push(node);
         }
         return children;
     }
 
-    private parseNode(): ASTNode | null {
-        const token = this.current();
-        if (!token) return null;
-
-        if (token.type === 'text') return this.parseText();
-        if (token.type === 'expr') return this.parseExpression();
-        if (token.type === 'open' || token.type === 'selfClose') return this.parseElement();
-        if (token.type === 'blockOpen') return this.parseBlock();
-        if (token.type === 'eof') return null;
-
-        this.advance();
-        return null;
-    }
-
-    private parseText(): ASTNode {
-        const token = this.advance();
-        return { type: 'Text', value: token.value, isStatic: true, loc: token.loc };
-    }
-
-    private parseExpression(): ASTNode {
-        const token = this.advance();
-        return { type: 'Expression', expression: token.value, isStatic: false, loc: token.loc };
-    }
-
-    private parseElement(): ASTNode {
-        const token = this.advance();
-        const data = JSON.parse(token.value);
-        const node: ASTNode = {
-            type: /^[A-Z]/.test(data.tag) ? 'Component' : 'Element',
-            tag: data.tag,
-            attributes: data.attributes,
-            loc: token.loc,
-        };
-
-        if (token.type === 'selfClose') {
-            node.children = [];
-            return node;
+    private _parseNode(): ASTNode | null {
+        const t = this._current();
+        if (!t) return null;
+        switch (t.type) {
+            case 'text': return this._parseText();
+            case 'expr': return this._parseExpression();
+            case 'open': case 'selfClose': return this._parseElement();
+            case 'blockOpen': return this._parseBlock();
+            case 'eof': return null;
+            default: this._advance(); return null;
         }
+    }
 
-        node.children = this.parseChildren();
-        if (this.current() && this.current().type === 'close') this.advance();
+    private _parseText(): ASTNode { const t = this._advance(); return { type: 'Text', value: t.value, isStatic: true, loc: t.loc }; }
+    private _parseExpression(): ASTNode { const t = this._advance(); return { type: 'Expression', expression: t.value, isStatic: false, loc: t.loc }; }
+
+    private _parseElement(): ASTNode {
+        const t = this._advance();
+        const data = JSON.parse(t.value);
+        const node: ASTNode = { type: /^[A-Z]/.test(data.tag) ? 'Component' : 'Element', tag: data.tag, attributes: data.attributes, loc: t.loc };
+        if (t.type === 'selfClose') { node.children = []; return node; }
+        node.children = this._parseChildren();
+        if (this._current()?.type === 'close') this._advance();
         return node;
     }
 
-    private parseBlock(): ASTNode {
-        const token = this.advance(); // blockOpen
-        const content = token.value;
-        const parts = content.split(/\s+/);
+    private _parseBlock(): ASTNode {
+        const t = this._advance();
+        const parts = t.value.split(/\s+/);
         const tagName = parts[0];
-
         if (tagName === 'each') {
-            // each items as item
             const asIndex = parts.indexOf('as');
             const expression = parts.slice(1, asIndex).join(' ');
             const context = parts.slice(asIndex + 1).join(' ');
-
-            const children = this.parseChildren();
-
-            this.advance(); // Consume blockClose
-
-            return {
-                type: 'Each',
-                expression,
-                context,
-                children,
-                loc: token.loc
-            };
+            const children = this._parseChildren();
+            this._advance();
+            return { type: 'Each', expression, context, children, loc: t.loc };
         }
-
         if (tagName === 'if') {
             const expression = parts.slice(1).join(' ');
-            const children = this.parseChildren();
-
+            const children = this._parseChildren();
             let elseNode: ASTNode | undefined;
-            if (this.current() && this.current().type === 'blockCont' && this.current().value.startsWith('else')) {
-                this.advance(); // consume :else
-                elseNode = {
-                    type: 'Else',
-                    children: this.parseChildren()
-                };
+            if (this._current()?.type === 'blockCont' && this._current().value.startsWith('else')) {
+                this._advance();
+                elseNode = { type: 'Else', children: this._parseChildren() };
             }
-
-            this.advance(); // Consume blockClose
-
-            return {
-                type: 'If',
-                expression,
-                children,
-                else: elseNode,
-                loc: token.loc
-            };
+            this._advance();
+            return { type: 'If', expression, children, else: elseNode, loc: t.loc };
         }
-
         throw new Error(`Unknown block type: ${tagName}`);
     }
 }
 
-
 export function parse(source: string): ASTNode {
-    const parser = new Parser();
-    return parser.parse(source);
+    return new Parser().parse(source);
 }
 
 export function isStaticNode(node: ASTNode): boolean {
     if (node.type === 'Expression') return false;
-    if (['If', 'Each', 'Await', 'Else'].includes(node.type)) return false;
+    if (node.type === 'If' || node.type === 'Each' || node.type === 'Await' || node.type === 'Else') return false;
     if (node.type === 'Text') return true;
-
     if (node.attributes) {
-        for (const key in node.attributes) {
-            const value = node.attributes[key];
-            if (typeof value === 'string' && value.startsWith('{')) return false;
+        const keys = Object.keys(node.attributes);
+        for (let i = 0; i < keys.length; i++) {
+            const val = node.attributes[keys[i]];
+            if (typeof val === 'string' && val.charCodeAt(0) === 123) return false;
         }
     }
-
-    if (node.children) return node.children.every(child => isStaticNode(child));
+    if (node.children) {
+        for (let i = 0; i < node.children.length; i++) {
+            if (!isStaticNode(node.children[i]!)) return false;
+        }
+    }
     return true;
 }

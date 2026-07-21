@@ -1,54 +1,61 @@
-export interface ReconcileItem {
-  key: string | number;
-  nodes: Node[];
+export interface ReconcileItem<T = unknown> {
+    key: string | number;
+    nodes: Node[];
+    data?: T;
 }
 
-export const reconcile = (
-  anchor: Comment,
-  oldItems: ReconcileItem[],
-  newData: any[],
-  keyFn: (item: any) => string | number,
-  renderFn: (item: any) => Node[]
-): ReconcileItem[] => {
-  const oldMap = new Map<string | number, ReconcileItem>();
-  for (const item of oldItems) {
-    oldMap.set(item.key, item);
-  }
+let _oldMap = new Map<string | number, ReconcileItem>();
 
-  const newItems: ReconcileItem[] = [];
-  const parent = anchor.parentNode!;
-  let nextSibling = anchor.nextSibling;
-
-  for (let i = 0; i < newData.length; i++) {
-    const key = keyFn(newData[i]);
-    const existing = oldMap.get(key);
-
-    if (existing) {
-      oldMap.delete(key);
-      newItems.push(existing);
-    } else {
-      const nodes = renderFn(newData[i]);
-      newItems.push({ key, nodes });
+export const reconcile = <T>(
+    anchor: Comment,
+    oldItems: ReconcileItem<T>[],
+    newData: T[],
+    keyFn: (item: T) => string | number,
+    renderFn: (item: T) => Node[]
+): ReconcileItem<T>[] => {
+    _oldMap.clear();
+    for (let i = 0; i < oldItems.length; i++) {
+        _oldMap.set(oldItems[i].key, oldItems[i] as ReconcileItem);
     }
-  }
 
-  for (const [, removed] of oldMap) {
-    for (const node of removed.nodes) {
-      node.parentNode?.removeChild(node);
-    }
-  }
+    const newItems: ReconcileItem<T>[] = new Array(newData.length);
+    const parent = anchor.parentNode!;
+    const nextSibling = anchor.nextSibling;
 
-  let insertBefore = nextSibling;
-  for (const item of newItems) {
-    for (const node of item.nodes) {
-      if (node.parentNode !== parent || node.nextSibling !== insertBefore) {
-        parent.insertBefore(node, insertBefore);
-      }
+    for (let i = 0; i < newData.length; i++) {
+        const key = keyFn(newData[i]!);
+        const existing = _oldMap.get(key);
+        if (existing) {
+            _oldMap.delete(key);
+            newItems[i] = existing as ReconcileItem<T>;
+        } else {
+            newItems[i] = { key, nodes: renderFn(newData[i]!), data: newData[i]! };
+        }
     }
-    if (item.nodes.length > 0) {
-      insertBefore = item.nodes[item.nodes.length - 1].nextSibling;
-    }
-  }
 
-  return newItems;
+    const removed = Array.from(_oldMap.values());
+    for (let i = 0; i < removed.length; i++) {
+        const item = removed[i]!;
+        for (let j = 0; j < item.nodes.length; j++) {
+            item.nodes[j]!.parentNode?.removeChild(item.nodes[j]!);
+        }
+    }
+    _oldMap.clear();
+
+    let insertBefore = nextSibling;
+    for (let i = 0; i < newItems.length; i++) {
+        const item = newItems[i]!;
+        const nodes = item.nodes;
+        for (let j = 0; j < nodes.length; j++) {
+            const node = nodes[j]!;
+            if (node.parentNode !== parent || node.nextSibling !== insertBefore) {
+                parent.insertBefore(node, insertBefore);
+            }
+        }
+        if (nodes.length > 0) {
+            insertBefore = nodes[nodes.length - 1]!.nextSibling;
+        }
+    }
+
+    return newItems;
 };

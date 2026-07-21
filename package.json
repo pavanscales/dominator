@@ -2,16 +2,24 @@
   "name": "dominator-monorepo",
   "private": true,
   "type": "module",
-  "scripts": {
-    "build": "pnpm --filter ./packages/* run build",
-    "compile": "ts-node --esm scripts/compile.ts",
-    "dev": "pnpm --filter todo-example run dev",
-    "test": "vitest"
-  },
+    "scripts": {
+        "build": "pnpm --filter @dominator/core run build && pnpm --filter ./packages/* run build",
+        "compile": "ts-node --esm scripts/compile.ts",
+        "compile:all": "pnpm run compile packages/todo-example/src/templates/todo-list.dnr packages/todo-example/src/generated/todo-render.ts && pnpm run compile packages/pixel-canvas/src/templates/canvas.dnr packages/pixel-canvas/src/generated/canvas-render.ts && pnpm run compile packages/ralph-loop/src/templates/ralph.dnr packages/ralph-loop/src/generated/ralph-render.ts renderRalph && pnpm run compile packages/stress-million-cells-grid/src/templates/grid.dnr packages/stress-million-cells-grid/src/generated/grid-render.ts",
+        "dev": "pnpm --filter todo-example run dev",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "typecheck": "tsc --noEmit",
+        "lint": "eslint packages/*/src/**/*.ts",
+        "clean": "rm -rf packages/*/dist packages/*/src/generated",
+        "full": "pnpm run build && pnpm run compile:all && pnpm run test"
+    },
   "devDependencies": {
-    "typescript": "^5.5.0",
-    "ts-node": "^10.9.2",
+    "@playwright/test": "^1.61.1",
     "@types/node": "^20.14.0",
+    "jsdom": "^29.1.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0",
     "vitest": "^1.6.0"
   },
   "packageManager": "pnpm@9.0.0"

@@ -1,8 +1,9 @@
 import { signal } from '@dominator/core';
 
 export const NODE_COUNT = 3000;
-const WIDTH = window.innerWidth;
-const HEIGHT = window.innerHeight;
+
+const getWidth = () => window.innerWidth;
+const getHeight = () => window.innerHeight;
 
 interface Node {
     id: number;
@@ -17,29 +18,29 @@ interface Node {
 }
 
 export const nodes = signal<Node[]>([]);
-export const mouse = { x: WIDTH / 2, y: HEIGHT / 2 };
+export const mouse = { x: getWidth() / 2, y: getHeight() / 2 };
 export const fps = signal(0);
 export const mode = signal<'chaos' | 'form'>('chaos');
 
 // Generate text targets
 const createTextTargets = () => {
     const canvas = document.createElement('canvas');
-    canvas.width = WIDTH;
-    canvas.height = HEIGHT;
+    canvas.width = getWidth();
+    canvas.height = getHeight();
     const ctx = canvas.getContext('2d')!;
     ctx.font = '900 15vw "Inter", sans-serif';
     ctx.fillStyle = 'white';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('DOMINATOR', WIDTH / 2, HEIGHT / 2);
+    ctx.fillText('DOMINATOR', getWidth() / 2, getHeight() / 2);
 
-    const imageData = ctx.getImageData(0, 0, WIDTH, HEIGHT).data;
+    const imageData = ctx.getImageData(0, 0, getWidth(), getHeight()).data;
     const points: { x: number, y: number }[] = [];
 
     // Scan pixel data (step 4 for performance)
-    for (let y = 0; y < HEIGHT; y += 6) {
-        for (let x = 0; x < WIDTH; x += 6) {
-            const alpha = imageData[(y * WIDTH + x) * 4 + 3];
+    for (let y = 0; y < getHeight(); y += 6) {
+        for (let x = 0; x < getWidth(); x += 6) {
+            const alpha = imageData[(y * getWidth() + x) * 4 + 3];
             if (alpha > 128) {
                 points.push({ x, y });
             }
@@ -54,8 +55,8 @@ const init = () => {
 
     for (let i = 0; i < NODE_COUNT; i++) {
         const target = targets[i % targets.length];
-        const x = Math.random() * WIDTH;
-        const y = Math.random() * HEIGHT;
+        const x = Math.random() * getWidth();
+        const y = Math.random() * getHeight();
 
         list.push({
             id: i,
@@ -63,8 +64,8 @@ const init = () => {
             y,
             vx: (Math.random() - 0.5) * 5,
             vy: (Math.random() - 0.5) * 5,
-            tx: target ? target.x : (Math.random() * WIDTH),
-            ty: target ? target.y : (Math.random() * HEIGHT),
+            tx: target ? target.x : (Math.random() * getWidth()),
+            ty: target ? target.y : (Math.random() * getHeight()),
             transform: signal(`translate3d(${x | 0}px, ${y | 0}px, 0)`),
             // Dynamic color signal for the shock effect
             color: signal('rgba(0, 112, 243, 0.8)')
@@ -151,10 +152,10 @@ const loop = () => {
 
         // Wrap only in chaos mode
         if (!isForming) {
-            if (n.x < 0) n.x = WIDTH;
-            else if (n.x > WIDTH) n.x = 0;
-            if (n.y < 0) n.y = HEIGHT;
-            else if (n.y > HEIGHT) n.y = 0;
+            if (n.x < 0) n.x = getWidth();
+            else if (n.x > getWidth()) n.x = 0;
+            if (n.y < 0) n.y = getHeight();
+            else if (n.y > getHeight()) n.y = 0;
         }
 
         n.transform.set(`translate3d(${n.x | 0}px, ${n.y | 0}px, 0)`);

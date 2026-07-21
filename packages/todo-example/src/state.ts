@@ -1,35 +1,26 @@
+import { signal, computed } from '@dominator/core';
+
 export interface Todo {
     id: number;
     text: string;
     done: boolean;
 }
 
-export interface State {
-    todos: Todo[];
-    inputValue: string;
-}
+export const todos = signal<Todo[]>([]);
+export const remainingCount = computed(() => todos().filter((t: Todo) => !t.done).length);
 
-export const state: State = {
-    todos: [],
-    inputValue: ''
-};
-
-export const addTodo = (text: string) => {
-    if (!text.trim()) return;
-    state.todos.push({
-        id: Date.now(),
-        text,
-        done: false
-    });
+export const addTodo = () => {
+    const input = document.getElementById('todo-input') as HTMLInputElement;
+    const text = input?.value?.trim();
+    if (!text) return;
+    todos.set([...todos(), { id: Date.now(), text, done: false }]);
+    if (input) input.value = '';
 };
 
 export const toggleTodo = (id: number) => {
-    const todo = state.todos.find(t => t.id === id);
-    if (todo) todo.done = !todo.done;
+    todos.set(todos().map((t: Todo) => t.id === id ? { ...t, done: !t.done } : t));
 };
 
 export const deleteTodo = (id: number) => {
-    state.todos = state.todos.filter(t => t.id !== id);
+    todos.set(todos().filter((t: Todo) => t.id !== id));
 };
-
-export const getRemainingCount = () => state.todos.filter(t => !t.done).length;
