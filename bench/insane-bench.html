@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Dominator INSANE Benchmark — Old vs New DOD</title>
+<style>
+  body { font-family: monospace; background: #0a0a0a; color: #00ff00; margin: 20px; }
+  h1 { color: #ff4444; font-size: 20px; }
+  .section { color: #ff8800; font-size: 15px; margin-top: 16px; font-weight: bold; border-top: 1px solid #333; padding-top: 8px; }
+  .result { margin: 3px 0; font-size: 13px; }
+  .old { color: #ff6666; }
+  .new { color: #00ff88; }
+  .win { color: #ffff00; font-weight: bold; }
+  .metric { font-weight: bold; }
+  #status { color: #00ffff; font-size: 16px; margin: 10px 0; }
+  #benchmark-data { display: none; }
+</style>
+</head>
+<body>
+<h1>DOMINATOR INSANE BENCHMARK — Old vs New DOD</h1>
+<div id="status">Initializing...</div>
+<div id="results"></div>
+<div id="benchmark-data" style="display:none"></div>
+
+<script>
+(function() {
+  const results = [];
+
+  // ═══════════════════════════════════════════════════════════════
+  // OLD SIGNAL ENGINE (unknown[] + number[][] — current production)
+  // ═══════════════════════════════════════════════════════════════
+  const OLD = {
+    _values: [], _subs: [], _manualSubs: [],
+    _effectFns: [], _effectDeps: [], _activeEffect: -1,
+    _batchDepth: 0, _dirtySignals: [], _dirtyBitmap: new Uint8Array(65536),
+
+    signal(v) {
+      const id = this._values.length;
+      this._values.push(v); this._subs.push([]); this._manualSubs.push([]);
+      const self = this;
+      const s = function() {
+        if (self._activeEffect >= 0) { self._subs[id].push(self._activeEffect); self._effectDeps[self._activeEffect].push(id); }
+        return self._values[id];
+      };
+      s.get = () => this._values[id];
+      s.set = (nv) => {
+        if (this._values[id] !== nv) {
+          this._values[id] = nv;
+          if (this._batchDepth > 0) {
+            if (id < 65536 && !this._dirtyBitmap[id]) { this._dirtyBitmap[id] = 1; this._dirtySignals.push(id); }
+            else if (id >= 65536) this._dirtySignals.push(id);
+          } else this._flushSignal(id);
+        }
+      };
+      return s;
+    },
+    _flushSignal(id) {
+      const subs = this._subs[id]; const len = subs.length;
+      for (let i = 0; i < len; i++) this._runEffect(subs[i]);
+    },
+    _runEffect(id) {
+      const oldDeps = this._effectDeps[id];
+      for (let i = 0; i < oldDeps.length; i++) {
+        const signalSubs = this._subs[oldDeps[i]]; const idx = signalSubs.indexOf(id);
+        if (idx >= 0) { signalSubs[idx] = signalSubs[signalSubs.length - 1]; signalSubs.length--; }
+      }
+      this._effectDeps[id] = [];
+      const prev = this._activeEffect; this._activeEffect = id; this._effectFns[id](); this._activeEffect = prev;
+    },
+    effect(fn) {
+      const id = this._effectFns.length; this._effectFns.push(fn); this._effectDeps.push([]); this._runEffect(id);
+    },
+    batch(fn) { this._batchDepth++; fn(); this._batchDepth--; if (this._batchDepth === 0 && this._dirtySignals.length > 0) this._drainDirty(); },
+    _drainDirty() {
+      const signals = this._dirtySignals; const count = signals.length;
+      const snap = new Array(count);
+      for (let i = 0; i < count; i++) { snap[i] = signals[i]; if (signals[i] < 65536) this._dirtyBitmap[signals[i]] = 0; }
+      signals.length = 0;
+      for (let i = 0; i < count; i++) this._flushSignal(snap[i]);
+    },
+    _reset() {
+      this._values.length = 0; this._subs.length = 0; this._manualSubs.length = 0;
+      this._effectFns.length = 0; this._effectDeps.length = 0; this._activeEffect = -1;
+      this._batchDepth = 0; this._dirtySignals.length = 0; this._dirtyBitmap = new Uint8Array(65536);
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════
+  // NEW SIGNAL ENGINE (Float64Array arena + Uint32Array subs)
+  // ═══════════════════════════════════════════════════════════════
+  const NEW_ENGINE = {
+    // Arena: Float64Array for numbers, unknown[] for mixed
+    _numValues: new Float64Array(131072),
+    _strHash: new Float64Array(131072), // hash-based string comparison
+    _strValues: new Array(131072),
+    _tags: new Uint8Array(131072), // 0=num, 1=str
+    _size: 0,
+    _capacity: 131072,
+
+    // Flat subs: single Uint32Array + offset/length
+    _subOffsets: new Uint32Array(131072),
+    _subLengths: new Uint8Array(131072),
+    _subData: new Uint32Array(262144),
+    _dataEnd: 0,
+
+    // Effects
+    _effectFns: new Array(131072),
+    _effectDeps: new Array(131072),
+    _effectGen: new Int32Array(131072),
+    _activeEffect: -1,
+    _effectCount: 0,
+
+    // Batching
+    _batchDepth: 0,
+    _flushGen: 0,
+    _dirtyBitmap: new Uint8Array(65536),
+    _dirtyBufA: new Int32Array(16384),
+    _dirtyBufB: new Int32Array(16384),
+    _dirtyBuf: null,
+    _dirtyCount: 0,
+
+    _allocSubSlot() { return this._dataEnd++; },
+
+    signal(v) {
+      const id = this._size++;
+      if (typeof v === 'string') {
+        this._tags[id] = 1;
+        let h = 0; for (let i = 0; i < v.length; i++) h = ((h << 5) - h + v.charCodeAt(i)) | 0;
+        this._strHash[id] = h || 1;
+        this._strValues[id] = v;
+      } else {
+        this._tags[id] = 0;
+        this._numValues[id] = v;
+      }
+      this._subOffsets[id] = 0;
+      this._subLengths[id] = 0;
+
+      const engine = this;
+      const s = function() {
+        if (engine._activeEffect >= 0) {
+          const len = engine._subLengths[id];
+          if (len === 0) {
+            const slot = engine._allocSubSlot();
+            engine._subOffsets[id] = slot;
+            engine._subData[slot] = engine._activeEffect;
+            engine._subLengths[id] = 1;
+          } else {
+            const off = engine._subOffsets[id];
+            engine._subData[off + len] = engine._activeEffect;
+            engine._subLengths[id] = len + 1;
+          }
+          engine._effectDeps[engine._activeEffect].push(id);
+        }
+        return engine._tags[id] === 1 ? engine._strValues[id] : engine._numValues[id];
+      };
+      s.get = () => this._tags[id] === 1 ? this._strValues[id] : this._numValues[id];
+      s.set = (nv) => {
+        let changed = false;
+        if (this._tags[id] === 1) {
+          if (typeof nv === 'string') {
+            let h = 0; for (let i = 0; i < nv.length; i++) h = ((h << 5) - h + nv.charCodeAt(i)) | 0;
+            h = h || 1;
+            if (this._strHash[id] !== h || this._strValues[id] !== nv) {
+              this._strHash[id] = h; this._strValues[id] = nv; changed = true;
+            }
+          } else { this._strValues[id] = nv; changed = true; }
+        } else {
+          if (this._numValues[id] !== nv) { this._numValues[id] = nv; changed = true; }
+        }
+        if (changed) {
+          if (this._batchDepth > 0) {
+            if (id < 65536 && !this._dirtyBitmap[id]) {
+              this._dirtyBitmap[id] = 1;
+              if (this._dirtyCount < this._dirtyBuf.length) {
+                this._dirtyBuf[this._dirtyCount++] = id;
+              }
+            }
+          } else this._flushSignal(id);
+        }
+      };
+      return s;
+    },
+    _flushSignal(id) {
+      if (id >= this._size) return;
+      const len = this._subLengths[id];
+      const off = this._subOffsets[id];
+      for (let i = 0; i < len; i++) this._runEffect(this._subData[off + i]);
+    },
+    _runEffect(id) {
+      if (id >= this._effectCount) return;
+      if (this._effectGen[id] === this._flushGen) return;
+      this._effectGen[id] = this._flushGen;
+      const oldDeps = this._effectDeps[id];
+      if (!oldDeps) return;
+      for (let i = 0; i < oldDeps.length; i++) {
+        const depId = oldDeps[i];
+        const subLen = this._subLengths[depId];
+        const subOff = this._subOffsets[depId];
+        for (let j = 0; j < subLen; j++) {
+          if (this._subData[subOff + j] === id) {
+            this._subData[subOff + j] = this._subData[subOff + subLen - 1];
+            this._subLengths[depId] = subLen - 1;
+            break;
+          }
+        }
+      }
+      this._effectDeps[id] = [];
+      const prev = this._activeEffect; this._activeEffect = id; this._effectFns[id](); this._activeEffect = prev;
+    },
+    effect(fn) {
+      const id = this._effectCount++;
+      this._effectFns[id] = fn;
+      this._effectDeps[id] = [];
+      this._effectGen[id] = -1;
+      this._runEffect(id);
+    },
+    batch(fn) { this._batchDepth++; fn(); this._batchDepth--; if (this._batchDepth === 0 && this._dirtyCount > 0) this._drainDirty(); },
+    _drainDirty() {
+      this._flushGen++;
+      const cur = this._dirtyBuf; const count = this._dirtyCount;
+      this._dirtyBuf = this._dirtyBuf === this._dirtyBufA ? this._dirtyBufB : this._dirtyBufA;
+      this._dirtyCount = 0;
+      for (let i = 0; i < count; i++) { const sid = cur[i]; if (sid < 65536) this._dirtyBitmap[sid] = 0; }
+      for (let i = 0; i < count; i++) this._flushSignal(cur[i]);
+    },
+    _reset() {
+      this._size = 0; this._effectCount = 0; this._dataEnd = 0;
+      this._batchDepth = 0; this._flushGen = 0; this._dirtyCount = 0;
+      this._dirtyBitmap = new Uint8Array(65536);
+      this._dirtyBufA = new Int32Array(16384);
+      this._dirtyBufB = new Int32Array(16384);
+      this._dirtyBuf = this._dirtyBufA;
+      this._subOffsets = new Uint32Array(131072);
+      this._subLengths = new Uint8Array(131072);
+      this._subData = new Uint32Array(262144);
+    }
+  };
+  NEW_ENGINE._dirtyBuf = NEW_ENGINE._dirtyBufA;
+
+  // ═══════════════════════════════════════════════════════════════
+  // BENCHMARK HELPERS
+  // ═══════════════════════════════════════════════════════════════
+  function bench(name, fn, durationMs) {
+    durationMs = durationMs || 2000;
+    let ops = 0;
+    const end = performance.now() + durationMs;
+    while (performance.now() < end) { fn(); ops++; }
+    const elapsed = performance.now() - (end - durationMs);
+    return { name, ops, elapsed, opsPerSec: Math.round(ops / (elapsed / 1000)) };
+  }
+
+  function fmt(n) { return n.toLocaleString(); }
+
+  const el = document.getElementById('results');
+  const status = document.getElementById('status');
+
+  function addSection(title) {
+    el.innerHTML += '<div class="section">' + title + '</div>';
+  }
+  function addResult(name, oldOps, newOps) {
+    const speedup = (newOps / oldOps).toFixed(1);
+    const winner = newOps >= oldOps ? 'new' : 'old';
+    el.innerHTML += '<div class="result">' +
+      '<span class="old">OLD: ' + fmt(oldOps) + '</span> | ' +
+      '<span class="new">NEW: ' + fmt(newOps) + '</span> | ' +
+      '<span class="win">WIN: ' + speedup + 'x ' + winner + '</span>' +
+      ' — ' + name + '</div>';
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // RUN BENCHMARKS
+  // ═══════════════════════════════════════════════════════════════
+  function runAll() {
+    // --- BENCH 1: Signal Write (no effects) ---
+    status.textContent = 'BENCH 1: Signal Write — 100K signals, no effects...';
+    setTimeout(function() {
+      OLD._reset(); NEW_ENGINE._reset();
+      const oldSigs = []; for (let i = 0; i < 100000; i++) oldSigs.push(OLD.signal(i));
+      const newSigs = []; for (let i = 0; i < 100000; i++) newSigs.push(NEW_ENGINE.signal(i));
+
+      const r1old = bench('signal_write_100k_old', function() {
+        for (let i = 0; i < 100000; i++) oldSigs[i].set(i + 1);
+      }, 3000);
+      const r1new = bench('signal_write_100k_new', function() {
+        for (let i = 0; i < 100000; i++) newSigs[i].set(i + 1);
+      }, 3000);
+
+      addSection('SIGNAL WRITE (100K signals, no effects)');
+      addResult('signal_write_100k', r1old.opsPerSec, r1new.opsPerSec);
+      results.push({ name: 'signal_write_100k_old', opsPerSec: r1old.opsPerSec, engine: 'old' });
+      results.push({ name: 'signal_write_100k_new', opsPerSec: r1new.opsPerSec, engine: 'new' });
+
+      // --- BENCH 2: Signal Write + Effect ---
+      status.textContent = 'BENCH 2: Signal Write + Effect — 100K signals with effects...';
+      setTimeout(function() {
+        OLD._reset(); NEW_ENGINE._reset();
+        const oldS2 = []; for (let i = 0; i < 100000; i++) oldS2.push(OLD.signal(i));
+        const newS2 = []; for (let i = 0; i < 100000; i++) newS2.push(NEW_ENGINE.signal(i));
+        for (let i = 0; i < 100000; i++) {
+          (function(idx) { OLD.effect(function() { oldS2[idx](); }); })(i);
+          (function(idx) { NEW_ENGINE.effect(function() { newS2[idx](); }); })(i);
+        }
+
+        const r2old = bench('signal_effect_100k_old', function() {
+          for (let i = 0; i < 100000; i++) oldS2[i].set(i + 2);
+        }, 3000);
+        const r2new = bench('signal_effect_100k_new', function() {
+          for (let i = 0; i < 100000; i++) newS2[i].set(i + 2);
+        }, 3000);
+
+        addSection('SIGNAL WRITE + EFFECT (100K signals → 100K effects)');
+        addResult('signal_effect_100k', r2old.opsPerSec, r2new.opsPerSec);
+        results.push({ name: 'signal_effect_100k_old', opsPerSec: r2old.opsPerSec, engine: 'old' });
+        results.push({ name: 'signal_effect_100k_new', opsPerSec: r2new.opsPerSec, engine: 'new' });
+
+        // --- BENCH 3: Batch Update (10K signals) ---
+        status.textContent = 'BENCH 3: Batch Update — 10K signals in batch...';
+        setTimeout(function() {
+          OLD._reset(); NEW_ENGINE._reset();
+          const oldS3 = []; for (let i = 0; i < 10000; i++) oldS3.push(OLD.signal(0));
+          const newS3 = []; for (let i = 0; i < 10000; i++) newS3.push(NEW_ENGINE.signal(0));
+          for (let i = 0; i < 10000; i++) {
+            (function(idx) { OLD.effect(function() { oldS3[idx](); }); })(i);
+            (function(idx) { NEW_ENGINE.effect(function() { newS3[idx](); }); })(i);
+          }
+          let cv = 0;
+
+          const r3old = bench('batch_10k_old', function() {
+            OLD.batch(function() { for (let i = 0; i < 10000; i++) oldS3[i].set(cv++); });
+          }, 3000);
+          cv = 0;
+          const r3new = bench('batch_10k_new', function() {
+            NEW_ENGINE.batch(function() { for (let i = 0; i < 10000; i++) newS3[i].set(cv++); });
+          }, 3000);
+
+          addSection('BATCH UPDATE (10K signals → 10K effects)');
+          addResult('batch_10k', r3old.opsPerSec, r3new.opsPerSec);
+          results.push({ name: 'batch_10k_old', opsPerSec: r3old.opsPerSec, engine: 'old' });
+          results.push({ name: 'batch_10k_new', opsPerSec: r3new.opsPerSec, engine: 'new' });
+
+          // --- BENCH 4: 100K Batch Stress ---
+          status.textContent = 'BENCH 4: 100K Batch Stress...';
+          setTimeout(function() {
+            OLD._reset(); NEW_ENGINE._reset();
+            const oldS4 = []; for (let i = 0; i < 100000; i++) oldS4.push(OLD.signal(0));
+            const newS4 = []; for (let i = 0; i < 100000; i++) newS4.push(NEW_ENGINE.signal(0));
+            for (let i = 0; i < 100000; i++) {
+              (function(idx) { OLD.effect(function() { oldS4[idx](); }); })(i);
+              (function(idx) { NEW_ENGINE.effect(function() { newS4[idx](); }); })(i);
+            }
+            cv = 0;
+
+            const r4old = bench('batch_100k_old', function() {
+              OLD.batch(function() { for (let i = 0; i < 100000; i++) oldS4[i].set(cv++); });
+            }, 3000);
+            cv = 0;
+            const r4new = bench('batch_100k_new', function() {
+              NEW_ENGINE.batch(function() { for (let i = 0; i < 100000; i++) newS4[i].set(cv++); });
+            }, 3000);
+
+            addSection('BATCH STRESS (100K signals → 100K effects)');
+            addResult('batch_100k', r4old.opsPerSec, r4new.opsPerSec);
+            results.push({ name: 'batch_100k_old', opsPerSec: r4old.opsPerSec, engine: 'old' });
+            results.push({ name: 'batch_100k_new', opsPerSec: r4new.opsPerSec, engine: 'new' });
+
+            // --- BENCH 5: String Signal Write ---
+            status.textContent = 'BENCH 5: String Signal Write (transforms)...';
+            setTimeout(function() {
+              OLD._reset(); NEW_ENGINE._reset();
+              const oldS5 = []; for (let i = 0; i < 50000; i++) oldS5.push(OLD.signal('translate(0px,0px)'));
+              const newS5 = []; for (let i = 0; i < 50000; i++) newS5.push(NEW_ENGINE.signal('translate(0px,0px)'));
+              let x = 0;
+
+              const r5old = bench('string_signal_50k_old', function() {
+                for (let i = 0; i < 50000; i++) {
+                  x += 0.01;
+                  oldS5[i].set('translate(' + (Math.sin(x + i) * 100 | 0) + 'px,' + (Math.cos(x + i) * 100 | 0) + 'px)');
+                }
+              }, 3000);
+              x = 0;
+              const r5new = bench('string_signal_50k_new', function() {
+                for (let i = 0; i < 50000; i++) {
+                  x += 0.01;
+                  newS5[i].set('translate(' + (Math.sin(x + i) * 100 | 0) + 'px,' + (Math.cos(x + i) * 100 | 0) + 'px)');
+                }
+              }, 3000);
+
+              addSection('STRING SIGNAL WRITE (50K transform strings)');
+              addResult('string_signal_50k', r5old.opsPerSec, r5new.opsPerSec);
+              results.push({ name: 'string_signal_50k_old', opsPerSec: r5old.opsPerSec, engine: 'old' });
+              results.push({ name: 'string_signal_50k_new', opsPerSec: r5new.opsPerSec, engine: 'new' });
+
+              // DONE — signal engine comparison complete
+              const dataEl = document.getElementById('benchmark-data');
+              dataEl.textContent = JSON.stringify(results);
+              dataEl.setAttribute('data-done', 'true');
+              status.textContent = 'BENCHMARK COMPLETE — ' + results.length + ' tests';
+            }, 100);
+          }, 100);
+        }, 100);
+      }, 100);
+    }, 100);
+  }
+
+  runAll();
+})();
+</script>
+</body>
+</html>
