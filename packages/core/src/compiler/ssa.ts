@@ -1,7 +1,7 @@
 import type { ASTNode } from './parse';
 
 export interface Instruction {
-    op: 'create' | 'attr' | 'event' | 'text' | 'expr' | 'append' | 'each' | 'if';
+    op: 'create' | 'attr' | 'event' | 'text' | 'expr' | 'append' | 'each' | 'if' | 'hoisted';
     target: string;
     args: (string | number | boolean)[];
     nested?: Instruction[];
