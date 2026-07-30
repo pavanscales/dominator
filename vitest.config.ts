@@ -5,5 +5,6 @@ export default defineConfig({
         globals: true,
         environment: 'jsdom',
         include: ['packages/core/src/**/*.test.ts', 'packages/stress-million-cells-grid/__tests__/**/*.test.ts'],
+        setupFiles: ['./vitest.setup.ts'],
     },
 });
