@@ -9,35 +9,35 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    container: node:22
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
       - run: npm install -g pnpm@9 && pnpm install
       - run: pnpm run typecheck
 
   test:
     runs-on: ubuntu-latest
-    container: node:22
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
       - run: npm install -g pnpm@9 && pnpm install
       - run: pnpm run test:ci
 
   benchmark:
     runs-on: ubuntu-latest
-    container: node:22
     needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
       - run: npm install -g pnpm@9 && pnpm install
       - run: pnpm exec tsx bench/engine-bench.mts
         name: Engine Performance Benchmark (regression detection)
 
   build:
     runs-on: ubuntu-latest
-    container: node:22
     needs: [lint, test, benchmark]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
       - run: npm install -g pnpm@9 && pnpm install
       - run: pnpm run build
