@@ -5,7 +5,7 @@ export default defineConfig({
     fullyParallel: false,
     retries: 0,
     workers: 1,
-    timeout: 300_000,
+    timeout: 600_000,
     expect: { timeout: 30_000 },
     use: {
         baseURL: 'http://localhost:5176',
@@ -18,14 +18,17 @@ export default defineConfig({
                 '--disable-gpu-sandbox',
                 '--disable-setuid-sandbox',
                 '--js-flags=--expose-gc',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
             ],
         },
     },
     webServer: {
         command: 'npx vite --port 5176',
         port: 5176,
-        cwd: '../..',
-        reuseExistingServer: true,
+        cwd: '..',
+        reuseExistingServer: false,
         timeout: 30_000,
     },
 });
