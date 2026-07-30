@@ -2,7 +2,7 @@
     "name": "@dominator/core",
     "version": "0.1.0",
     "type": "module",
-    "description": "Compiler-based reactive UI framework with zero virtual DOM",
+    "description": "HPC reactive UI engine — zero VDOM, zero GC, bare metal",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "exports": {
@@ -29,12 +29,13 @@
         "reactive",
         "signals",
         "compiler",
-        "virtual-dom",
+        "no-vdom",
         "SSA"
     ],
     "license": "MIT",
-    "dependencies": {},
     "devDependencies": {
+        "@types/node": "^26.1.2",
+        "@webgpu/types": "^0.1.71",
         "typescript": "^5.5.0"
     }
 }
