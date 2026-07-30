@@ -33,6 +33,19 @@ importers:
         specifier: ^5.5.0
         version: 5.9.3
 
+  packages/hundred-k-particles:
+    dependencies:
+      '@dominator/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+      vite:
+        specifier: ^5.4.0
+        version: 5.4.21(@types/node@20.19.30)
+
   packages/pixel-canvas:
     dependencies:
       '@dominator/core':
@@ -57,6 +70,19 @@ importers:
         version: 5.9.3
       vite:
         specifier: ^5.2.0
+        version: 5.4.21(@types/node@20.19.30)
+
+  packages/scene-editor:
+    dependencies:
+      '@dominator/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+      vite:
+        specifier: ^5.4.0
         version: 5.4.21(@types/node@20.19.30)
 
   packages/stress-million-cells-grid:
