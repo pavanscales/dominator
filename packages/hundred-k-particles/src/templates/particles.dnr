@@ -1,0 +1,3 @@
+<div class="particles-container">
+    <div class="particle" style:transform={particleTransform} style:backgroundColor={particleColor} />
+</div>
