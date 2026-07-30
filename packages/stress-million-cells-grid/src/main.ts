@@ -190,6 +190,8 @@ effect(() => {
                 _cellDataC[r][c] = actualCol;
                 cell.className = sel === idx ? S.getCellClassSelected(val) : S.getCellClassName(val);
                 cell.style.background = S.getCellBg(val);
+                cell.dataset.r = String(actualRow);
+                cell.dataset.c = String(actualCol);
                 _textEls[r][c].textContent = S.getCellText(val);
             }
 
@@ -370,13 +372,10 @@ document.addEventListener('visibilitychange', () => {
     if (!_hidden) {
         lastTime = performance.now();
         _fillRandBuf();
-        requestAnimationFrame(loop);
     }
 });
 
 function loop() {
-    if (_hidden) return;
-
     frameCount++;
     const now = performance.now();
     const delta = now - lastTime;
@@ -390,7 +389,7 @@ function loop() {
         let sum = 0;
         for (let i = 0; i < frameRingLen; i++) sum += frameDeltas[i];
         const avgDelta = sum / frameRingLen;
-        const fps = Math.round(1000 / avgDelta);
+        const fps = avgDelta > 0 ? Math.min(999, Math.round(1000 / avgDelta)) : 0;
         S.perf.fps.set(fps);
         S.perf.avgRenderTime.set(Number(avgDelta.toFixed(2)));
 
