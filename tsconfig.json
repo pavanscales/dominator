@@ -1,0 +1,16 @@
+{
+    "extends": "./tsconfig.base.json",
+    "include": [
+        "packages/core/src/**/*.ts",
+        "packages/stress-million-cells-grid/src/**/*.ts",
+        "packages/*/src/**/*.ts",
+        "bench/**/*.ts",
+        "scripts/**/*.ts"
+    ],
+    "exclude": [
+        "packages/core/src/zig/**/*",
+        "packages/core/src/bench/**/*",
+        "**/generated/**/*",
+        "packages/pixel-canvas/**/*"
+    ]
+}

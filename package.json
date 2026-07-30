@@ -10,6 +10,7 @@
         "compile:all": "pnpm run compile packages/todo-example/src/templates/todo-list.dnr packages/todo-example/src/generated/todo-render.ts && pnpm run compile packages/pixel-canvas/src/templates/canvas.dnr packages/pixel-canvas/src/generated/canvas-render.ts && pnpm run compile packages/ralph-loop/src/templates/ralph.dnr packages/ralph-loop/src/generated/ralph-render.ts renderRalph && pnpm run compile packages/stress-million-cells-grid/src/templates/grid.dnr packages/stress-million-cells-grid/src/generated/grid-render.ts",
         "dev": "pnpm --filter todo-example run dev",
         "test": "vitest run",
+        "test:ci": "vitest run --config vitest.ci.config.ts",
         "test:watch": "vitest",
         "typecheck": "tsc --noEmit",
         "lint": "eslint packages/*/src/**/*.ts",
