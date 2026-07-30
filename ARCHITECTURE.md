@@ -24,33 +24,35 @@ High-performance UI engine built on **Data-Oriented Design**. Compiles `.dnr` te
 
 ## Runtime Core (`packages/core/src/`)
 
-### Signal (`signal.ts`)
+### Signal (`signal.ts`) — BARE METAL v8
 
-All state in parallel flat arrays. Signal = integer ID into `_values[]`. Effect = integer ID into `_effectFns[]`.
+All state in flat typed arrays. Signal = integer ID into `Float64Array`. Effect = integer ID into `()=>void[]`.
 
 ```
-_values:     any[]       ← signal values
-_subs:       number[][]  ← signalId → effectId[]
-_effectFns:  Function[]  ← effect functions
-_effectDeps: number[][]  ← effectId → signalId[]
+_f64:        Float64Array      ← signal values (number fast path)
+_directEff:  (()=>void)[]      ← DIRECT effect callback (90% case, 3 array ops)
+_subsData:   Int32Array         ← flat subscriber array (cache-friendly)
+_effDepsData: Int32Array        ← flat dependency array
+_jsDirtyBitmap: Uint32Array     ← JS-side dirty tracking (zero WASM calls)
 ```
 
-- **Read**: `_values[id]` — single array access
-- **Write**: Direct set + dirty bitmap dedup (`Uint8Array[8192]`)
-- **Batch**: `_batchDepth` counter, deferred notification, O(1) nesting
-- **Cleanup**: Swap-remove on effect re-run — no unbounded subscriber growth
+- **Read**: `_f64[id]` — single float64 array access
+- **Write**: `_f64[id]=val` → `_directEff[id]()` — 3 array ops + 1 function call
+- **Direct-effect**: 90% of signals with 1 subscriber skip subscriber arrays entirely
+- **Batch**: Generation-based dedup, O(1) nesting
+- **WASM bridge**: Only for arena allocation (strings, objects) — numbers stay in JS
 
 ### Events (`events.ts`)
 
-Integer node IDs via `WeakMap<Node, number>` + `Map<number, Map<string, Fn>>` handler table. Pre-allocated `Node[64]` bubble path.
+Direct property access (`__did` stamp) instead of WeakMap. CharCode dispatch instead of Map lookup. Flat Int32Array handler table indexed by `nodeId * EVENT_COUNT + typeIndex`. Event bitmask per node for O(1) early-exit when no handler registered. Pre-allocated `Node[128]` bubble path.
 
 ### Pool (`pool.ts`)
 
 Power-of-2 ring buffer with bitmask wrap. O(1) get/release, no `Array.shift()`.
 
-### Reconcile (`reconcile.ts`)
+### DomCmd (`dom-cmd.ts`)
 
-Reusable `Map` with `.clear()` between calls. Pre-allocated result arrays.
+Jump-table dispatch DOM command buffer. Bounded string table with LRU eviction. Element ID recycling with generation tags. Opcode-based batch — single drain pass per frame.
 
 ### Router (`router.ts`)
 
@@ -120,17 +122,20 @@ dominator/
 │       └── src/
 │           ├── compiler/    parse.ts, ssa.ts, optimize.ts, codegen.ts, vite-plugin.ts
 │           ├── __tests__/   91 tests across 9 test files
-│           ├── signal.ts    Flat-array reactive core
-│           ├── batch.ts     Re-export
+│           ├── signal.ts    Flat-array reactive core (BARE METAL v8)
+│           ├── subs-flat.ts WASM-backed subscriber arrays
 │           ├── events.ts    Integer-ID event delegation
-│           ├── vnode.ts     VNode types + text cache
-│           ├── mount.ts     VNode → DOM
-│           ├── patch.ts     VNode diffing
+│           ├── dom-cmd.ts   Zero-allocation DOM command buffer
+│           ├── css-batch.ts Zero-allocation style pipeline
 │           ├── pool.ts      Ring buffer pool
-│           ├── reconcile.ts Keyed list reconciliation
 │           ├── router.ts    Trie-based router
 │           ├── ssr.ts       Server-side rendering
-│           └── index.ts     Public API
+│           ├── arena.ts     WASM-backed typed arena allocator
+│           ├── dom-pool.ts  Pre-allocated DOM node pool
+│           ├── wasm-glue.ts WASM initialization bridge
+│           ├── ultra-scene-editor.ts ECS-based DOM inspector
+│           ├── index.ts     Public API
+│           └── engine/      HPC ECS engine with frame pipeline
 ├── bench/
 │   ├── index.html           Benchmark page (inlined framework)
 │   ├── run.mts              Playwright + CDP benchmark runner
