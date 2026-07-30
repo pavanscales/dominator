@@ -12,7 +12,7 @@ jobs:
     container: node:22
     steps:
       - uses: actions/checkout@v4
-      - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
+      - run: npm install -g pnpm@9 && pnpm install
       - run: pnpm run typecheck
 
   test:
@@ -20,7 +20,7 @@ jobs:
     container: node:22
     steps:
       - uses: actions/checkout@v4
-      - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
+      - run: npm install -g pnpm@9 && pnpm install
       - run: pnpm run test:ci
 
   benchmark:
@@ -29,7 +29,7 @@ jobs:
     needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
-      - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
+      - run: npm install -g pnpm@9 && pnpm install
       - run: pnpm exec tsx bench/engine-bench.mts
         name: Engine Performance Benchmark (regression detection)
 
@@ -39,5 +39,5 @@ jobs:
     needs: [lint, test, benchmark]
     steps:
       - uses: actions/checkout@v4
-      - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
+      - run: npm install -g pnpm@9 && pnpm install
       - run: pnpm run build
