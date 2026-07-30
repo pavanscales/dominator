@@ -6,29 +6,30 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  NODE_VERSION: "22"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: corepack enable && pnpm install --frozen-lockfile
       - run: pnpm run typecheck
 
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: corepack enable && pnpm install --frozen-lockfile
       - run: pnpm run test:ci
 
   benchmark:
@@ -36,13 +37,12 @@ jobs:
     needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: npx tsx bench/engine-bench.mts
+      - run: corepack enable && pnpm install --frozen-lockfile
+      - run: pnpm exec tsx bench/engine-bench.mts
         name: Engine Performance Benchmark (regression detection)
 
   build:
@@ -50,10 +50,9 @@ jobs:
     needs: [lint, test, benchmark]
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: corepack enable && pnpm install --frozen-lockfile
       - run: pnpm run build
