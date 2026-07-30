@@ -1,0 +1,14 @@
+src/ultra-scene-editor.ts(162,9): error TS2322: Type 'ArrayBufferLike' is not assignable to type 'ArrayBuffer'.
+src/ultra-scene-editor.ts(166,9): error TS2322: Type 'ArrayBufferLike' is not assignable to type 'ArrayBuffer'.
+src/ultra-scene-editor.ts(170,9): error TS2322: Type 'ArrayBufferLike' is not assignable to type 'ArrayBuffer'.
+src/ultra-scene-editor.ts(177,13): error TS2564: Property 'device' has no initializer and is not definitely assigned in the constructor.
+src/ultra-scene-editor.ts(178,13): error TS2564: Property 'pipeline' has no initializer and is not definitely assigned in the constructor.
+src/ultra-scene-editor.ts(179,13): error TS2564: Property 'transformBuffer' has no initializer and is not definitely assigned in the constructor.
+src/ultra-scene-editor.ts(180,13): error TS2564: Property 'colorBuffer' has no initializer and is not definitely assigned in the constructor.
+src/ultra-scene-editor.ts(181,13): error TS2564: Property 'selectionBuffer' has no initializer and is not definitely assigned in the constructor.
+src/ultra-scene-editor.ts(182,13): error TS2564: Property 'sharedData' has no initializer and is not definitely assigned in the constructor.
+src/ultra-scene-editor.ts(308,41): error TS2339: Property 'getCurrentCanvasContext' does not exist on type 'GPUDevice'.
+src/ultra-scene-editor.ts(319,40): error TS2339: Property 'canvas' does not exist on type 'GPUDevice'.
+src/ultra-scene-editor.ts(319,66): error TS2339: Property 'canvas' does not exist on type 'GPUDevice'.
+src/ultra-scene-editor.ts(381,38): error TS2341: Property 'sharedBuffer' is private and only accessible within class 'SharedDataManager'.
+src/ultra-scene-editor.ts(683,28): error TS2339: Property 'terminate' does not exist on type 'PhysicsWorker'.
