@@ -17,7 +17,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
       - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
       - run: pnpm run typecheck
 
@@ -28,7 +27,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
       - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
       - run: pnpm run test:ci
 
@@ -40,7 +38,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
       - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
       - run: pnpm exec tsx bench/engine-bench.mts
         name: Engine Performance Benchmark (regression detection)
@@ -53,6 +50,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
       - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
       - run: pnpm run build
