@@ -91,12 +91,14 @@ function _collectIdentifiers(instructions: Instruction[]): string[] {
 export interface CodegenOptions {
     functionName?: string;
     stateImportPath?: string;
+    aggressive?: boolean; // New flag for maximum aggression mode
 }
 
 export const codegen = (instructions: Instruction[], options: CodegenOptions | string = {}): string => {
     const opts = typeof options === 'string' ? { functionName: options } : options;
     const functionName = opts.functionName ?? 'render';
     const stateImportPath = opts.stateImportPath ?? '../state';
+    const aggressive = opts.aggressive ?? false; // Get aggressive flag
 
     const parts: string[] = [];
     const idents = _collectIdentifiers(instructions);
@@ -110,7 +112,7 @@ export const codegen = (instructions: Instruction[], options: CodegenOptions | s
     } else {
         parts.push('\n');
     }
-    _genBlock(parts, instructions, '  ');
+    _genBlock(parts, instructions, '  ', aggressive); // Pass aggressive flag
     const targets = new Set<string>();
     const children = new Set<string>();
     for (let i = 0; i < instructions.length; i++) {
@@ -127,7 +129,7 @@ function _escapeStringArg(val: string): string {
     return JSON.stringify(val);
 }
 
-function _genBlock(parts: string[], instrs: Instruction[], indent: string): void {
+function _genBlock(parts: string[], instrs: Instruction[], indent: string, aggressive: boolean): void {
     for (let i = 0; i < instrs.length; i++) {
         const ins = instrs[i]!;
         const { op, target, args, nested } = ins;
@@ -137,16 +139,28 @@ function _genBlock(parts: string[], instrs: Instruction[], indent: string): void
                 break;
             case 'attr': {
                 const [key, value] = args;
-                if (typeof key === 'string' && key.startsWith('style:')) {
-                    const styleProp = key.split(':')[1];
+                const keyStr = String(key);
+
+                if (aggressive && keyStr.startsWith('style:')) {
+                    const styleProp = keyStr.split(':')[1];
                     if (typeof value === 'string' && value.startsWith('{') && value.endsWith('}')) {
                         const expr = value.slice(1, -1);
                         if (!validateExpression(expr)) {
-                            throw new Error(`[dominator] Dangerous expression blocked in style binding: ${expr}`);
+                            throw new Error(`[dominator] Dangerous expression blocked in aggressive style binding: ${expr}`);
                         }
                         parts.push(`${indent}effect(() => { ${target}.style.${styleProp} = ${expr}; });\n`);
                     } else {
                         parts.push(`${indent}${target}.style.${styleProp} = ${JSON.stringify(value)};\n`);
+                    }
+                } else if (aggressive && (keyStr === 'className' || keyStr === 'textContent' || keyStr === 'value')) {
+                    if (typeof value === 'string' && value.startsWith('{') && value.endsWith('}')) {
+                        const expr = value.slice(1, -1);
+                        if (!validateExpression(expr)) {
+                            throw new Error(`[dominator] Dangerous expression blocked in aggressive property binding: ${expr}`);
+                        }
+                        parts.push(`${indent}effect(() => { ${target}.${keyStr} = ${expr}; });\n`);
+                    } else {
+                        parts.push(`${indent}${target}.${keyStr} = ${JSON.stringify(value)};\n`);
                     }
                 } else {
                     if (typeof value === 'string' && value.startsWith('{') && value.endsWith('}')) {
@@ -154,9 +168,9 @@ function _genBlock(parts: string[], instrs: Instruction[], indent: string): void
                         if (!validateExpression(expr)) {
                             throw new Error(`[dominator] Dangerous expression blocked in attribute: ${expr}`);
                         }
-                        parts.push(`${indent}effect(() => { ${target}.setAttribute(${_escapeStringArg(String(key))}, String(${expr})); });\n`);
+                        parts.push(`${indent}effect(() => { ${target}.setAttribute(${_escapeStringArg(keyStr)}, String(${expr})); });\n`);
                     } else {
-                        parts.push(`${indent}${target}.setAttribute(${_escapeStringArg(String(key))}, ${JSON.stringify(value)});\n`);
+                        parts.push(`${indent}${target}.setAttribute(${_escapeStringArg(keyStr)}, ${JSON.stringify(value)});\n`);
                     }
                 }
                 break;
@@ -182,8 +196,14 @@ function _genBlock(parts: string[], instrs: Instruction[], indent: string): void
                 if (!validateExpression(expr)) {
                     throw new Error(`[dominator] Dangerous expression blocked: ${expr}`);
                 }
-                parts.push(`${indent}const ${target} = document.createTextNode('');\n`);
-                parts.push(`${indent}effect(() => { ${target}.textContent = String(${expr}); });\n`);
+                if (aggressive) {
+                    // In aggressive mode, directly update textContent within an effect
+                    parts.push(`${indent}effect(() => { ${target}.textContent = String(${expr}); });\n`);
+                } else {
+                    // Original behavior: create a text node and then update its textContent
+                    parts.push(`${indent}const ${target} = document.createTextNode('');\n`);
+                    parts.push(`${indent}effect(() => { ${target}.textContent = String(${expr}); });\n`);
+                }
                 break;
             }
             case 'append':
@@ -200,7 +220,7 @@ function _genBlock(parts: string[], instrs: Instruction[], indent: string): void
                 parts.push(`${indent}    for (let ${iterVar} = 0; ${iterVar} < ${arrVar}.length; ${iterVar}++) {\n`);
                 parts.push(`${indent}        const ${context} = ${arrVar}[${iterVar}];\n`);
                 if (nested) {
-                    _genBlock(parts, nested, indent + '        ');
+                    _genBlock(parts, nested, indent + '        ', aggressive); // Pass aggressive flag
                     const created = new Set(nested.filter((n) => n.op === 'create' || n.op === 'text' || n.op === 'expr' || n.op === 'each').map((n) => n.target));
                     const appended = new Set(nested.filter((n) => n.op === 'append').map((n) => n.args[0] as string));
                     created.forEach((r) => { if (!appended.has(r)) parts.push(`${indent}        ${target}.appendChild(${r});\n`); });
@@ -216,9 +236,17 @@ function _genBlock(parts: string[], instrs: Instruction[], indent: string): void
                 }
                 parts.push(`${indent}effect(() => {\n`);
                 parts.push(`${indent}  if (${expr}) {\n`);
-                if (nested) { _genBlock(parts, nested, indent + '    '); }
+                if (nested) { _genBlock(parts, nested, indent + '    ', aggressive); } // Pass aggressive flag
                 parts.push(`${indent}  }\n`);
                 parts.push(`${indent}});\n`);
+                break;
+            }
+            case 'hoisted': {
+                if (nested && nested.length > 0) {
+                    parts.push(`${indent}effect(() => {\n`);
+                    _genBlock(parts, nested, indent + '  ', aggressive); // Pass aggressive flag
+                    parts.push(`${indent}});\n`);
+                }
                 break;
             }
         }
