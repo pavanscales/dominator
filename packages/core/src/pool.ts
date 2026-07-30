@@ -40,23 +40,12 @@ export class Pool<T> {
     }
 
     clear(): void {
-        for (let i = 0; i < this._buf.length; i++) {
-            this._buf[i] = null;
+        const buf = this._buf;
+        const len = buf.length;
+        for (let i = 0; i < len; i++) {
+            buf[i] = null;
         }
         this._head = 0;
         this._count = 0;
     }
 }
-
-import { VNode } from './vnode';
-
-export const vnodePool = new Pool<VNode>(
-    () => ({ tag: null, props: null, children: null, key: null, el: null }),
-    (v) => {
-        v.tag = null;
-        v.props = null;
-        v.children = null;
-        v.key = null;
-        v.el = null;
-    }
-);
