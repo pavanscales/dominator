@@ -17,7 +17,7 @@
 
 body {
     margin: 0;
-    background-color: var(--background);
+    background-color: var(--background);o
     color: var(--foreground);
     font-family: 'JetBrains Mono', 'SF Mono', monospace;
     -webkit-font-smoothing: antialiased;
