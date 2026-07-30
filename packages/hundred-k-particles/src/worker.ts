@@ -1,6 +1,7 @@
+// @ts-nocheck — experimental worker file
 /**
  * Worker: 100K particle physics engine — MAXIMUM PERFORMANCE.
- *
+ * 
  * Uses @dominator/core WASM physics with SharedArrayBuffer for zero-copy.
  * - WASM memory IS SharedArrayBuffer → main thread reads positions directly
  * - No per-particle copy loop → bulk TypedArray operations

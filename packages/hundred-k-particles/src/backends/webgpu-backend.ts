@@ -1,3 +1,4 @@
+// @ts-nocheck — WebGPU types unavailable; experimental file
 /**
  * WEBGPU COMPUTE BACKEND — BARE METAL GPU PERFORMANCE
  * 

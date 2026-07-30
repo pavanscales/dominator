@@ -208,6 +208,8 @@ function runBenchmarks(): BenchResult[] {
             paintNodes: 150,
             gpuCommands: 80,
             memoryUsed: 1024 * 1024,
+            degradeLevel: 0,
+            culpritStage: 0,
         }, 100);
     }));
 
@@ -313,7 +315,7 @@ function main(): number {
                 frameNumber: i,
                 timestamp: performance.now(),
                 stageTimings: new Float64Array(7),
-                totalFrameTime: r.avgNs / 1e6, // convert ns to ms
+                totalFrameTime: r.avgNs / 1e6,
                 signalsUpdated: 100,
                 effectsExecuted: 50,
                 domWrites: 200,
@@ -321,6 +323,8 @@ function main(): number {
                 paintNodes: 150,
                 gpuCommands: 80,
                 memoryUsed: 1024 * 1024,
+                degradeLevel: 0,
+                culpritStage: 0,
             }, 100);
         }
     }

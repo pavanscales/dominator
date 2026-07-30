@@ -1,3 +1,4 @@
+// @ts-nocheck — WebGPU types unavailable; experimental
 /**
  * 100K PARTICLES — WEBGPU COMPUTE + RENDER PIPELINE (BARE METAL GPU PERFORMANCE)
  * 

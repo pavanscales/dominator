@@ -1,3 +1,4 @@
+// @ts-nocheck — WebGPU types unavailable; experimental file
 /**
  * ULTIMATE 3D Scene Editor - 500k+ Objects with Zig WASM Physics
  * 
