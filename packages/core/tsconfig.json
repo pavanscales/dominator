@@ -7,7 +7,8 @@
         "declaration": true,
         "declarationMap": true,
         "sourceMap": true,
-        "allowImportingTsExtensions": false
+        "allowImportingTsExtensions": false,
+        "types": ["@webgpu/types", "node"]
     },
     "include": [
         "src/**/*"
