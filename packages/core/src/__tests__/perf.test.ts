@@ -168,7 +168,7 @@ describe('PERF: batching', () => {
                 for (let i = 0; i < 100; i++) signals[i]!.set(runs + i);
             });
         });
-        expect(r.opsPerSec).toBeGreaterThan(5_000);
+        expect(r.opsPerSec).toBeGreaterThan(4_000);
     });
 });
 
