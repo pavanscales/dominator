@@ -1,13 +1,41 @@
 {
     "name": "@dominator/core",
-    "version": "0.0.1",
+    "version": "0.1.0",
     "type": "module",
-    "main": "./src/index.ts",
-    "scripts": {
-        "build": "tsc"
+    "description": "HPC reactive UI engine — zero VDOM, zero GC, bare metal",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "import": "./dist/index.js",
+            "types": "./dist/index.d.ts"
+        },
+        "./compiler": {
+            "import": "./dist/compiler/vite-plugin.js",
+            "types": "./dist/compiler/vite-plugin.d.ts"
+        }
     },
-    "dependencies": {},
+    "files": [
+        "dist"
+    ],
+    "sideEffects": false,
+    "scripts": {
+        "build": "tsc",
+        "typecheck": "tsc --noEmit",
+        "prepublishOnly": "pnpm run build"
+    },
+    "keywords": [
+        "framework",
+        "reactive",
+        "signals",
+        "compiler",
+        "no-vdom",
+        "SSA"
+    ],
+    "license": "MIT",
     "devDependencies": {
+        "@types/node": "^26.1.2",
+        "@webgpu/types": "^0.1.71",
         "typescript": "^5.5.0"
     }
 }

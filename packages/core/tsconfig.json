@@ -2,9 +2,18 @@
     "extends": "../../tsconfig.base.json",
     "compilerOptions": {
         "outDir": "./dist",
-        "rootDir": "./src"
+        "rootDir": "./src",
+        "noEmit": false,
+        "declaration": true,
+        "declarationMap": true,
+        "sourceMap": true,
+        "allowImportingTsExtensions": false,
+        "types": ["@webgpu/types", "node"]
     },
     "include": [
         "src/**/*"
+    ],
+    "exclude": [
+        "src/**/__tests__/**"
     ]
 }

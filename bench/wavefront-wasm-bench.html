@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Wavefront Engine — WASM Browser Benchmark</title>
+<style>
+  body { font-family: monospace; background: #0a0a0a; color: #00ff00; margin: 20px; }
+  h1 { color: #ff4444; font-size: 20px; }
+  h2 { color: #ff8800; font-size: 15px; margin-top: 16px; border-top: 1px solid #333; padding-top: 8px; }
+  .result { margin: 3px 0; font-size: 13px; }
+  .metric { color: #ffff00; }
+  .val { color: #00ff88; font-weight: bold; }
+  .desc { color: #888; font-size: 12px; }
+  #status { color: #00ffff; font-size: 16px; margin: 10px 0; }
+  #results { margin-top: 10px; }
+  table { border-collapse: collapse; width: 100%; max-width: 900px; }
+  th { text-align: left; color: #ff8800; border-bottom: 1px solid #555; padding: 6px 10px; }
+  td { padding: 4px 10px; border-bottom: 1px solid #222; }
+  .right { text-align: right; }
+  .hilite { background: #141414; }
+  pre { color: #0f0; }
+</style>
+</head>
+<body>
+<h1>⚡ WAVEFRONT ENGINE — WASM BROWSER BENCHMARK</h1>
+<div id="status">Loading WASM...</div>
+<div id="results"></div>
+<div id="benchmark-data" style="display:none"></div>
+
+<script>
+const resultsEl = document.getElementById('results');
+const statusEl = document.getElementById('status');
+let tbody = null;
+
+const results = [];
+
+function log(msg) { resultsEl.innerHTML += '<div class="result">' + msg + '</div>'; }
+function fmtNum(n) { return n.toLocaleString('en-US', { maximumFractionDigits: 1 }); }
+
+function runBench(name, fn, durationMs) {
+  durationMs = durationMs || 2000;
+  let ops = 0;
+  const end = performance.now() + durationMs;
+  while (performance.now() < end) { fn(); ops++; }
+  const elapsed = performance.now() - (end - durationMs);
+  const opsPerSec = ops / (elapsed / 1000);
+  const nsPerOp = (elapsed / ops) * 1e6;
+  return { name, ops, elapsed, opsPerSec, nsPerOp };
+}
+
+function addResult(r, dirtyCount) {
+  const row = tbody.insertRow();
+  row.innerHTML =
+    '<td class="hilite">' + r.name + '</td>' +
+    '<td class="right">' + fmtNum(r.opsPerSec) + '</td>' +
+    '<td class="right">' + fmtNum(r.nsPerOp) + '</td>' +
+    '<td class="right">' + fmtNum(r.ops) + '</td>' +
+    '<td class="right">' + fmtNum(dirtyCount) + '</td>';
+  results.push({ name: r.name, ops: r.ops, opsPerSec: r.opsPerSec, nsPerOp: r.nsPerOp, dirtyCount });
+}
+
+// Compute DIRTY_BITMAP_START from Zig constants (mirrored from dominator_core.zig)
+const INITIAL_CAP = 4096;
+const BITMAP_SIZE = 65536;
+const BITMAP_WORDS = BITMAP_SIZE / 32;
+const NUM_WORDS = 2 * INITIAL_CAP;
+const TAG_START = NUM_WORDS;
+const BOOL_START = TAG_START + INITIAL_CAP;
+const STR_META_START = BOOL_START + INITIAL_CAP;
+const STR_META_WORDS = 2 * INITIAL_CAP;
+const SUB_OFFSET_START = STR_META_START + STR_META_WORDS;
+const SUB_LENGTH_START = SUB_OFFSET_START + INITIAL_CAP;
+const EFF_DEP_OFFSET_START = SUB_LENGTH_START + INITIAL_CAP;
+const EFF_DEP_LENGTH_START = EFF_DEP_OFFSET_START + INITIAL_CAP;
+const EFF_GEN_START = EFF_DEP_LENGTH_START + INITIAL_CAP;
+const EFF_RUNNING_START = EFF_GEN_START + INITIAL_CAP;
+const EFF_DISPOSED_START = EFF_RUNNING_START + INITIAL_CAP;
+const DIRTY_BITMAP_START = EFF_DISPOSED_START + INITIAL_CAP;
+
+async function main() {
+  statusEl.textContent = 'Loading WASM module...';
+  const response = await fetch('dominator_core_test.wasm');
+  const bytes = await response.arrayBuffer();
+  const importObj = { env: { memory: new WebAssembly.Memory({ initial: 256, maximum: 256 }) } };
+  const { instance } = await WebAssembly.instantiate(bytes, importObj);
+  const wasm = instance.exports;
+  statusEl.textContent = 'WASM loaded. Running benchmarks...';
+
+  // Build table
+  resultsEl.innerHTML =
+    '<table><thead><tr><th>Benchmark</th><th class="right">Ops/sec</th><th class="right">ns/op</th><th class="right">Iterations</th><th class="right">Dirty</th></tr></thead><tbody id="bench-tbody"></tbody></table>';
+  tbody = document.getElementById('bench-tbody');
+
+  // ── BENCH 1: 50k chain, seed 0 ──
+  log('<h2>■ BENCH 1: Chain 50k — seed signal 0 → propagate all 50,000</h2>');
+  {
+    const n = 50000;
+    const deps = wasm.setup_deps_chain(n);
+    const view = new Uint32Array(importObj.env.memory.buffer);
+    view[DIRTY_BITMAP_START] = 1; // mark signal 0 dirty
+
+    const r = runBench('chain_50k_full', () => {
+      wasm.wf_expand(deps, n);
+      const words = (n + 31) >> 5;
+      for (let w = 0; w < words; w++) view[DIRTY_BITMAP_START + w] = 0;
+      view[DIRTY_BITMAP_START] = 1;
+    }, 3000);
+
+    const dirty = wasm.wf_expand(deps, n);
+    addResult(r, dirty);
+  }
+
+  // ── BENCH 2: 50k chain, seed at 49990 (propagate 10) ──
+  log('<h2>■ BENCH 2: Chain 50k — seed at 49990 → propagate 10 signals</h2>');
+  {
+    const n = 50000;
+    const deps = wasm.setup_deps_chain(n);
+    const view = new Uint32Array(importObj.env.memory.buffer);
+    const seedWord = (n - 10) >> 5;
+    const seedBit = (n - 10) & 31;
+
+    view[DIRTY_BITMAP_START + seedWord] = 1 << seedBit;
+
+    const r = runBench('chain_50k_tail10', () => {
+      wasm.wf_expand(deps, n);
+      const words = (n + 31) >> 5;
+      for (let w = 0; w < words; w++) view[DIRTY_BITMAP_START + w] = 0;
+      view[DIRTY_BITMAP_START + seedWord] = 1 << seedBit;
+    }, 3000);
+
+    const dirty = wasm.wf_expand(deps, n);
+    addResult(r, dirty);
+  }
+
+  // ── BENCH 3: 50k chain, 4 seeds ──
+  log('<h2>■ BENCH 3: Chain 50k — 4 seeds → propagate all to 50,000</h2>');
+  {
+    const n = 50000;
+    const deps = wasm.setup_deps_chain(n);
+    const view = new Uint32Array(importObj.env.memory.buffer);
+
+    view[DIRTY_BITMAP_START + 0] = 1;
+    view[DIRTY_BITMAP_START + 390] = 1 << (12500 & 31);
+    view[DIRTY_BITMAP_START + 781] = 1 << (25000 & 31);
+    view[DIRTY_BITMAP_START + 1171] = 1 << (37500 & 31);
+
+    const r = runBench('chain_50k_4seeds', () => {
+      wasm.wf_expand(deps, n);
+      const words = (n + 31) >> 5;
+      for (let w = 0; w < words; w++) view[DIRTY_BITMAP_START + w] = 0;
+      view[DIRTY_BITMAP_START + 0] = 1;
+      view[DIRTY_BITMAP_START + 390] = 1 << (12500 & 31);
+      view[DIRTY_BITMAP_START + 781] = 1 << (25000 & 31);
+      view[DIRTY_BITMAP_START + 1171] = 1 << (37500 & 31);
+    }, 3000);
+
+    const dirty = wasm.wf_expand(deps, n);
+    addResult(r, dirty);
+  }
+
+  // ── BENCH 4: 65k max chain ──
+  log('<h2>■ BENCH 4: Chain 65536 (full bitmap) — seed 0 → propagate all</h2>');
+  {
+    const n = 65536;
+    const deps = wasm.setup_deps_chain(n);
+    const view = new Uint32Array(importObj.env.memory.buffer);
+    view[DIRTY_BITMAP_START] = 1;
+
+    const r = runBench('chain_65536_full', () => {
+      wasm.wf_expand(deps, n);
+      const words = (n + 31) >> 5;
+      for (let w = 0; w < words; w++) view[DIRTY_BITMAP_START + w] = 0;
+      view[DIRTY_BITMAP_START] = 1;
+    }, 3000);
+
+    const dirty = wasm.wf_expand(deps, n);
+    addResult(r, dirty);
+  }
+
+  // ── BENCH 5: 100 chain ──
+  log('<h2>■ BENCH 5: Chain 100 — seed 0 → propagate 100</h2>');
+  {
+    const n = 100;
+    const deps = wasm.setup_deps_chain(n);
+    const view = new Uint32Array(importObj.env.memory.buffer);
+    view[DIRTY_BITMAP_START] = 1;
+
+    const r = runBench('chain_100_full', () => {
+      wasm.wf_expand(deps, n);
+      view[DIRTY_BITMAP_START] = 0;
+      view[DIRTY_BITMAP_START] = 1;
+    }, 3000);
+
+    const dirty = wasm.wf_expand(deps, n);
+    addResult(r, dirty);
+  }
+
+  // ── BENCH 6: 65536 chain, no dirty signals (empty scan) ──
+  log('<h2>■ BENCH 6: Chain 65536 — empty bitmap (no dirty) → scan only</h2>');
+  {
+    const n = 65536;
+    const deps = wasm.setup_deps_chain(n);
+
+    const r = runBench('chain_65536_empty', () => {
+      wasm.wf_expand(deps, n);
+    }, 3000);
+
+    const dirty = wasm.wf_expand(deps, n);
+    addResult(r, dirty);
+  }
+
+  // ── SUMMARY ──
+  log('<h2>✓ BENCHMARK COMPLETE</h2>');
+  statusEl.textContent = '✓ DONE — wavefront WASM benchmark complete';
+  const dataEl = document.getElementById('benchmark-data');
+  dataEl.textContent = JSON.stringify(results);
+  dataEl.setAttribute('data-done', 'true');
+}
+
+main().catch(e => { statusEl.textContent = 'ERROR: ' + e.message; console.error(e); });
+</script>
+</body>
+</html>

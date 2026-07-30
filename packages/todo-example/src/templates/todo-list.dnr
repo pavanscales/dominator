@@ -2,12 +2,17 @@
   <h1>Dominator Todo</h1>
   <div class="input-group">
     <input type="text" placeholder="What needs to be done?" id="todo-input" />
-    <button onclick="addTodo">Add</button>
+    <button onclick="{addTodo}">Add</button>
   </div>
   <ul class="todo-list">
-    {todoItems}
+    {#each todos() as todo}
+      <li class="{todo.done ? 'done' : ''}">
+        <span onclick="{() => toggleTodo(todo.id)}">{todo.text}</span>
+        <button onclick="{() => deleteTodo(todo.id)}">X</button>
+      </li>
+    {/each}
   </ul>
   <div class="footer">
-    <span>{remainingCount} items left</span>
+    <span>{remainingCount()} items left</span>
   </div>
 </div>

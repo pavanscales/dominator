@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>100K PARTICLES — Dominator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a0f;
+            overflow: hidden;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            color: #fff;
+        }
+        #app { width: 100vw; height: 100vh; position: relative; overflow: hidden; }
+        canvas { display: block; }
+        .perf-overlay {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            background: rgba(0, 0, 0, 0.85);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 16px 20px;
+            font-size: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            z-index: 1000;
+            min-width: 220px;
+            backdrop-filter: blur(10px);
+        }
+        .perf-title {
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            margin-bottom: 12px;
+            color: #00f0ff;
+            text-transform: uppercase;
+        }
+        .perf-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            color: #888;
+        }
+        .perf-mono {
+            font-family: 'JetBrains Mono', monospace;
+            color: #00ff88;
+            font-weight: 600;
+        }
+        .perf-mono.bad { color: #ff4444; }
+        .perf-mono.warn { color: #eab308; }
+        .perf-divider {
+            border-top: 1px solid rgba(255,255,255,0.1);
+            margin: 8px 0;
+        }
+        .info-overlay {
+            position: fixed;
+            bottom: 16px;
+            left: 16px;
+            background: rgba(0, 0, 0, 0.85);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 16px 20px;
+            font-size: 12px;
+            z-index: 1000;
+            backdrop-filter: blur(10px);
+        }
+        .info-overlay h2 {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, #00f0ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .info-overlay p {
+            color: #666;
+            margin-bottom: 4px;
+        }
+        .info-overlay .highlight { color: #00ff88; font-weight: 600; }
+        .click-hint {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 14px;
+            color: rgba(255,255,255,0.3);
+            pointer-events: none;
+            transition: opacity 2s ease;
+        }
+    </style>
+</head>
+<body>
+    <div id="app"></div>
+    <div class="perf-overlay">
+        <div class="perf-title">100K PARTICLES</div>
+        <div class="perf-row"><span>FPS</span><span id="po-fps" class="perf-mono">--</span></div>
+        <div class="perf-row"><span>PHYSICS</span><span id="po-physics" class="perf-mono">--ms</span></div>
+        <div class="perf-row"><span>RENDER</span><span id="po-render" class="perf-mono">--ms</span></div>
+        <div class="perf-row"><span>TOTAL</span><span id="po-total" class="perf-mono">--ms</span></div>
+        <div class="perf-divider"></div>
+        <div class="perf-row"><span>PARTICLES</span><span id="po-count" class="perf-mono">--</span></div>
+        <div class="perf-row"><span>DOM NODES</span><span id="po-dom" class="perf-mono">--</span></div>
+        <div class="perf-row"><span>MODE</span><span id="po-mode" class="perf-mono">CHAOS</span></div>
+    </div>
+    <div class="info-overlay">
+        <h2>DOMINATOR</h2>
+        <p><span class="highlight">100,000</span> reactive particles</p>
+        <p>WebWorker physics • SharedArrayBuffer • Zero-copy</p>
+        <p>Click to explode • Move mouse to repel</p>
+    </div>
+    <div class="click-hint" id="hint">move your mouse</div>
+    <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

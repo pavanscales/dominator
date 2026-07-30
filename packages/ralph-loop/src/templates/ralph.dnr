@@ -7,8 +7,8 @@
     {#each getNodes() as n}
       <div 
         class="node" 
-        style:transform={n.transform}
-        style:backgroundColor={n.color}
+        style:transform={n.transform()}
+        style:backgroundColor={n.color()}
       />
     {/each}
   </div>

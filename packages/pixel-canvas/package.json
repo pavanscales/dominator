@@ -4,6 +4,7 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
+        "build": "tsc --noEmit",
         "compile": "ts-node --esm ../../scripts/compile.ts src/templates/canvas.dnr src/generated/canvas-render.ts"
     },
     "dependencies": {
