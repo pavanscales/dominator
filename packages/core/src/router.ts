@@ -30,13 +30,13 @@ function _buildTrie(routes: Route[]): TrieNode {
 
     for (const route of routes) {
         if (route.path === '*') continue;
-        const segments = route.path.split('/').filter(Boolean);
+        const segments = _splitSegments(route.path);
         let node = root;
-        for (const seg of segments) {
-            let child = node.children.get(seg);
+        for (let i = 0; i < segments.length; i++) {
+            let child = node.children.get(segments[i]!);
             if (!child) {
                 child = { children: new Map(), route: null };
-                node.children.set(seg, child);
+                node.children.set(segments[i]!, child);
             }
             node = child;
         }
@@ -47,16 +47,34 @@ function _buildTrie(routes: Route[]): TrieNode {
 }
 
 function _matchTrie(root: TrieNode, pathname: string): Route | null {
-    const segments = pathname.split('/').filter(Boolean);
+    const segments = _splitSegments(pathname);
     let node = root;
 
-    for (const seg of segments) {
-        const child = node.children.get(seg);
+    for (let i = 0; i < segments.length; i++) {
+        const child = node.children.get(segments[i]!);
         if (!child) return null;
         node = child;
     }
 
     return node.route;
+}
+
+// Zero-allocation segment splitter: avoids split+filter on every call
+function _splitSegments(path: string): string[] {
+    const segments: string[] = [];
+    let start = -1;
+    for (let i = 0; i < path.length; i++) {
+        if (path.charCodeAt(i) === 47) { // '/'
+            if (start >= 0) {
+                segments.push(path.substring(start, i));
+                start = -1;
+            }
+        } else {
+            if (start < 0) start = i;
+        }
+    }
+    if (start >= 0) segments.push(path.substring(start));
+    return segments;
 }
 
 export const createRouter = (routes: Route[]): HTMLElement => {
