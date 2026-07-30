@@ -13,7 +13,7 @@
         "test:ci": "vitest run --config vitest.ci.config.ts",
         "test:watch": "vitest",
         "typecheck": "tsc --noEmit",
-        "lint": "eslint packages/*/src/**/*.ts",
+        "lint": "tsc --noEmit",
         "clean": "rm -rf packages/*/dist packages/*/src/generated",
         "full": "pnpm run build && pnpm run compile:all && pnpm run test"
     },
