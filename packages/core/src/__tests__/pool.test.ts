@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { Pool, vnodePool } from '../pool';
+import { Pool } from '../pool';
 
 describe('Pool', () => {
     it('creates objects via factory when pool is empty', () => {
@@ -70,18 +70,6 @@ describe('Pool', () => {
         expect(pool.size).toBe(0);
         pool.release(o);
         expect(pool.size).toBe(1);
-    });
-});
-
-describe('vnodePool', () => {
-    it('creates and recycles VNodes', () => {
-        const v1 = vnodePool.get();
-        v1.tag = 'div';
-        vnodePool.release(v1);
-
-        const v2 = vnodePool.get();
-        expect(v2).toBe(v1);
-        expect(v2.tag).toBeNull();
     });
 });
 
