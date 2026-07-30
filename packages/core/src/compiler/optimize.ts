@@ -5,6 +5,8 @@ export const optimize = (instructions: Instruction[]): Instruction[] => {
     result = _dce(result);
     result = _foldStatic(result);
     result = _mergeStaticText(result);
+    result = _liftStaticBranches(result);
+    result = _inlineSmallEffects(result);
     return result;
 };
 
@@ -114,6 +116,73 @@ function _mergeStaticText(instrs: Instruction[]): Instruction[] {
                 result.push(ins);
             }
             i++;
+        }
+    }
+    return result;
+}
+
+/**
+ * Static branch elimination: if the condition is a compile-time constant
+ * (e.g., `if {true}` or `if {false}`), replace the `if` block with just
+ * the live branch contents (or nothing for dead branches).
+ */
+const _CONSTANT_TRUE = /^(true|1|"[^"]*"|'[^']*')$/;
+const _CONSTANT_FALSE = /^(false|0|""|'')$/;
+
+function _liftStaticBranches(instrs: Instruction[]): Instruction[] {
+    const result: Instruction[] = [];
+    for (let i = 0; i < instrs.length; i++) {
+        const ins = instrs[i]!;
+        if (ins.op === 'if' && ins.args[0] !== undefined) {
+            const cond = String(ins.args[0]);
+            if (_CONSTANT_TRUE.test(cond)) {
+                if (ins.nested) {
+                    const inlined = _liftStaticBranches(ins.nested);
+                    for (let j = 0; j < inlined.length; j++) result.push(inlined[j]!);
+                }
+                continue;
+            }
+            if (_CONSTANT_FALSE.test(cond)) {
+                continue;
+            }
+        }
+        if (ins.nested) {
+            result.push({ ...ins, nested: _liftStaticBranches(ins.nested) });
+        } else {
+            result.push(ins);
+        }
+    }
+    return result;
+}
+
+/**
+ * Inline small effects: if an `each` or `if` block contains only
+ * static create+attr+append instructions (no dynamic expr), unwrap them
+ * from the effect and emit them directly. Reduces function call overhead.
+ */
+function _isFullyStaticBlock(instrs: Instruction[]): boolean {
+    for (let i = 0; i < instrs.length; i++) {
+        const ins = instrs[i]!;
+        if (ins.op === 'expr') return false;
+        if (ins.op === 'attr' && typeof ins.args[1] === 'string' && ins.args[1].startsWith('{')) return false;
+        if (ins.op === 'each' || ins.op === 'if') return false;
+        if (ins.nested && !_isFullyStaticBlock(ins.nested)) return false;
+    }
+    return true;
+}
+
+function _inlineSmallEffects(instrs: Instruction[]): Instruction[] {
+    const result: Instruction[] = [];
+    for (let i = 0; i < instrs.length; i++) {
+        const ins = instrs[i]!;
+        // Only inline `if` blocks with compile-time constant conditions, never `each` (dynamic loops)
+        if (ins.op === 'if' && ins.nested && _isFullyStaticBlock(ins.nested) && (_CONSTANT_TRUE.test(String(ins.args[0])) || _CONSTANT_FALSE.test(String(ins.args[0])))) {
+            const inlined = _inlineSmallEffects(ins.nested);
+            for (let j = 0; j < inlined.length; j++) result.push(inlined[j]!);
+        } else if (ins.nested) {
+            result.push({ ...ins, nested: _inlineSmallEffects(ins.nested) });
+        } else {
+            result.push(ins);
         }
     }
     return result;
