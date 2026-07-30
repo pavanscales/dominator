@@ -6,49 +6,38 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  NODE_VERSION: "22"
-
 jobs:
   lint:
     runs-on: ubuntu-latest
+    container: node:22
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
       - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
       - run: pnpm run typecheck
 
   test:
     runs-on: ubuntu-latest
+    container: node:22
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
       - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
       - run: pnpm run test:ci
 
   benchmark:
     runs-on: ubuntu-latest
+    container: node:22
     needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
       - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
       - run: pnpm exec tsx bench/engine-bench.mts
         name: Engine Performance Benchmark (regression detection)
 
   build:
     runs-on: ubuntu-latest
+    container: node:22
     needs: [lint, test, benchmark]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
       - run: npm install -g pnpm@latest && pnpm install --frozen-lockfile
       - run: pnpm run build
