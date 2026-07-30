@@ -1,0 +1,246 @@
+/* ═══════════════════════════════════════════════════════════════════════════════
+   Scene Editor — Dominator 500K Particle Demo
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+:root {
+    --bg: #050508;
+    --panel-bg: rgba(0, 0, 0, 0.88);
+    --panel-border: rgba(255, 255, 255, 0.08);
+    --accent: #00f0ff;
+    --green: #00ff88;
+    --text: #ccc;
+    --text-dim: #555;
+    --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background: var(--bg);
+    overflow: hidden;
+    font-family: var(--font);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+}
+
+/* ── Particle canvas ──────────────────────────────────────────────────────── */
+
+#app {
+    width: 100vw;
+    height: 100vh;
+    position: relative;
+    background: radial-gradient(ellipse at 50% 50%, #0a0a12 0%, #030306 100%);
+}
+
+.p {
+    position: absolute;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    top: 0;
+    left: 0;
+    will-change: transform;
+    contain: layout style;
+    pointer-events: none;
+}
+
+/* ── Performance overlay (top-right) ─────────────────────────────────────── */
+
+.perf-overlay {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    font-size: 11px;
+    font-family: var(--mono);
+    z-index: 1000;
+    min-width: 240px;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+}
+
+.perf-title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    margin-bottom: 14px;
+    background: linear-gradient(135deg, var(--accent), var(--green));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    text-transform: uppercase;
+}
+
+.perf-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 5px;
+    color: var(--text-dim);
+}
+
+.perf-val {
+    font-family: var(--mono);
+    color: var(--green);
+    font-weight: 600;
+    transition: color 0.3s;
+}
+
+.perf-val.bad { color: #ff4444; }
+.perf-val.warn { color: #eab308; }
+
+.perf-divider {
+    border-top: 1px solid var(--panel-border);
+    margin: 10px 0;
+}
+
+/* ── Selection panel (bottom-right) ──────────────────────────────────────── */
+
+.sel-overlay {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    font-size: 11px;
+    font-family: var(--mono);
+    z-index: 1000;
+    min-width: 200px;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+}
+
+.sel-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    margin-bottom: 10px;
+    color: var(--accent);
+    text-transform: uppercase;
+}
+
+.sel-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+    color: var(--text-dim);
+}
+
+.sel-val {
+    font-family: var(--mono);
+    color: var(--text);
+    font-weight: 500;
+}
+
+/* ── Info overlay (bottom-left) ──────────────────────────────────────────── */
+
+.info-overlay {
+    position: fixed;
+    bottom: 16px;
+    left: 16px;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    font-size: 12px;
+    z-index: 1000;
+    max-width: 360px;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+}
+
+.info-overlay h2 {
+    font-size: 22px;
+    font-weight: 800;
+    margin-bottom: 10px;
+    letter-spacing: 2px;
+    background: linear-gradient(135deg, var(--accent), var(--green));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.info-overlay p {
+    color: var(--text-dim);
+    margin-bottom: 5px;
+    line-height: 1.5;
+}
+
+.info-overlay .hl { color: var(--green); font-weight: 600; }
+
+/* ── Mode selector ───────────────────────────────────────────────────────── */
+
+.mode-bar {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 6px;
+    z-index: 1000;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 6px;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+}
+
+.mode-btn {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    padding: 8px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    background: transparent;
+    color: #555;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-transform: uppercase;
+}
+
+.mode-btn:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: #aaa;
+}
+
+.mode-btn.active {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+/* ── Click hint ──────────────────────────────────────────────────────────── */
+
+.click-hint {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.2);
+    pointer-events: none;
+    transition: opacity 2s ease;
+    font-family: var(--mono);
+    letter-spacing: 2px;
+}
+
+/* ── Background grid effect ──────────────────────────────────────────────── */
+
+#app::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image:
+        linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+    background-size: 80px 80px;
+    pointer-events: none;
+    z-index: 0;
+}

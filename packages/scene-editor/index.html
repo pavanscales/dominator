@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DOMINATOR — 500K Particle Scene</title>
+    <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+    <div id="app"></div>
+
+    <!-- Mode selector -->
+    <div class="mode-bar">
+        <button class="mode-btn active" data-mode="0">CHAOS</button>
+        <button class="mode-btn" data-mode="1">FORM</button>
+        <button class="mode-btn" data-mode="2">SPIRAL</button>
+        <button class="mode-btn" data-mode="3">VORTEX</button>
+    </div>
+
+    <!-- Performance overlay -->
+    <div class="perf-overlay">
+        <div class="perf-title">SCENE EDITOR</div>
+        <div class="perf-row"><span>FPS</span><span id="po-fps" class="perf-val">--</span></div>
+        <div class="perf-row"><span>PHYSICS</span><span id="po-physics" class="perf-val">--ms</span></div>
+        <div class="perf-row"><span>RENDER</span><span id="po-render" class="perf-val">--ms</span></div>
+        <div class="perf-row"><span>TOTAL</span><span id="po-total" class="perf-val">--ms</span></div>
+        <div class="perf-divider"></div>
+        <div class="perf-row"><span>PARTICLES</span><span id="po-count" class="perf-val">--</span></div>
+        <div class="perf-row"><span>DOM NODES</span><span id="po-dom" class="perf-val">--</span></div>
+        <div class="perf-row"><span>MODE</span><span id="po-mode" class="perf-val">CHAOS</span></div>
+    </div>
+
+    <!-- Selection panel -->
+    <div class="sel-overlay">
+        <div class="sel-title">SELECTION</div>
+        <div class="sel-row"><span>ID</span><span id="sel-id" class="sel-val">---</span></div>
+        <div class="sel-row"><span>POS</span><span id="sel-pos" class="sel-val">---</span></div>
+    </div>
+
+    <!-- Info overlay -->
+    <div class="info-overlay">
+        <h2>DOMINATOR</h2>
+        <p><span class="hl">500,000</span> reactive particles</p>
+        <p>Zig WASM arena + SharedArrayBuffer + Workers</p>
+        <p>Click to explode · Mouse to repel</p>
+    </div>
+
+    <div class="click-hint" id="hint">move your mouse</div>
+
+    <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
