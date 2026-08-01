@@ -1008,27 +1008,15 @@ export function signalArray(count: number, initialValue: number = 0): SignalArra
 
         setValues(values: Float32Array | Float64Array | number[]): void {
             const len = values.length < count ? values.length : count;
-            let changed = false;
-
-            if (values instanceof Float64Array) {
-                _f64.set(values.subarray(0, len), baseId);
-                changed = true;
-            } else {
-                for (let i = 0; i < len; i++) {
-                    const id = baseId + i;
-                    const val = values[i];
-                    if (_f64[id] !== val) {
-                        _f64[id] = val;
-                        changed = true;
-                    }
-                }
-            }
-
-            if (!changed) return;
 
             _jsBatchDepth++;
             for (let i = 0; i < len; i++) {
-                _jsMarkDirty(baseId + i);
+                const id = baseId + i;
+                const val = values[i];
+                if (_f64[id] !== val) {
+                    _f64[id] = val;
+                    _jsMarkDirty(id);
+                }
             }
             _jsBatchDepth--;
 
