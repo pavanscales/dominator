@@ -959,7 +959,11 @@ export function signalArray(count: number, initialValue: number = 0): SignalArra
         baseId,
 
         get(i: number): number {
-            return _f64[baseId + i];
+            const id = baseId + i;
+            if (_activeEffect >= 0) {
+                _trackSignal(id);
+            }
+            return _f64[id];
         },
 
         set(i: number, value: number): void {
