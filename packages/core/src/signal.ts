@@ -17,6 +17,7 @@ import {
     getCore,
     getU32View,
     getF64View,
+    onViewRefresh,
 } from './wasm-glue';
 
 import {
@@ -39,11 +40,16 @@ let _u32!: Uint32Array;
 let _f64: Float64Array;
 let _initialized = false;
 
+function _rebindViews(): void {
+    _u32 = getU32View();
+    _f64 = getF64View();
+}
+
 function _ensureCore(): void {
     if (_initialized) return;
     _core = getCore();
-    _u32 = getU32View();
-    _f64 = getF64View();
+    _rebindViews();
+    onViewRefresh(_rebindViews);
     _initialized = true;
 }
 

@@ -79,16 +79,24 @@ const _encoder = new TextEncoder();
 // Reusable buffer for string writing (grows if needed)
 let _strWriteBuf: Uint8Array = new Uint8Array(256);
 
-function _setupViews(): void {
+// View refresh listeners — modules that cache typed views re-bind after growth
+let _viewListeners: (() => void)[] = [];
+
+function _bindViews(): void {
     if (!_core || !_memory) return;
-    // Must init() first to initialize the dynamic heap pointer
-    _core.init();
     const buf = _memory.buffer;
     const offset = _core.heap_base();
     _f64View = new Float64Array(buf, offset);
     _u32View = new Uint32Array(buf, offset);
     _u8View = new Uint8Array(buf, offset);
     _i32View = new Int32Array(buf, offset);
+}
+
+// Must init() once before binding — initializes the dynamic heap pointer
+function _initAndBindViews(): void {
+    if (!_core || !_memory) return;
+    _core.init();
+    _bindViews();
 }
 
 function _trySyncLoad(): boolean {
@@ -104,7 +112,7 @@ function _trySyncLoad(): boolean {
         _memory = new WebAssembly.Memory({ initial: 1024, maximum: 8192 });
         const instance = new WebAssembly.Instance(wasmModule, { env: { memory: _memory } });
         _core = instance.exports as unknown as CoreExports;
-        _setupViews();
+        _initAndBindViews();
         return true;
     } catch {
         return false;
@@ -122,7 +130,7 @@ export function getCore(): CoreExports {
         if (!_memory) {
             _memory = (globalThis as any).__DOMINATOR_WASM_MEMORY__;
         }
-        _setupViews();
+        _initAndBindViews();
         return _core!;
     }
 
@@ -177,7 +185,7 @@ export async function initCore(source?: WebAssembly.Module | string | URL): Prom
     const imports = { env: { memory: _memory } };
     const instance = await WebAssembly.instantiate(wasmModule, imports);
     _core = instance.exports as unknown as CoreExports;
-    _setupViews();
+    _initAndBindViews();
     return _core!;
 }
 
@@ -190,15 +198,29 @@ export function initCoreSync(instance: WebAssembly.Instance, memory?: WebAssembl
     if (!_memory) {
         _memory = (globalThis as any).__DOMINATOR_WASM_MEMORY__ ?? null;
     }
-    _setupViews();
+    _initAndBindViews();
     return _core!;
 }
 
 /**
  * Refresh typed views after memory growth.
+ *
+ * Re-binds the typed views to the (possibly grown) WASM memory buffer WITHOUT
+ * calling init(), so arena and effect state is preserved.
  */
 export function refreshViews(): void {
-    if (_core && _memory) _setupViews();
+    if (!_core || !_memory) return;
+    _bindViews();
+    for (let i = 0; i < _viewListeners.length; i++) {
+        _viewListeners[i]();
+    }
+}
+
+/**
+ * Register a callback invoked after views are re-bound following memory growth.
+ */
+export function onViewRefresh(fn: () => void): void {
+    _viewListeners.push(fn);
 }
 
 /**
