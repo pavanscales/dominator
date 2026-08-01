@@ -404,15 +404,16 @@ function _executeFrame(s: FrameScheduler): void {
         // COOPERATIVE YIELD: if ahead of schedule, yield between stage groups
         _maybeYield(s, frameStart, g);
 
-        // HARD REAL-TIME CHECK: if we're over budget, degrade remaining stages
+        // HARD REAL-TIME CHECK: if we're over budget, degrade remaining stages.
+        // Degradation is applied once; the current and subsequent groups pick up
+        // their per-stage flags below — every stage runs at most once per frame.
         elapsed = performance.now() - frameStart;
-        if (elapsed >= budgetMs && g > 1) {
+        if (elapsed >= budgetMs && g > 1 && degradeLevel === 0) {
             degradeLevel = _computeDegrade(elapsed, budgetMs);
             _applyDegrade(s, degradeLevel, group[0]);
             culprit = group[0];
             stats.degradeLevel = degradeLevel;
             stats.culpritStage = culprit;
-            break; // Apply degradation to remaining groups
         }
 
         if (group.length === 1) {
@@ -439,39 +440,6 @@ function _executeFrame(s: FrameScheduler): void {
                 }
                 stageStart = performance.now();
                 if (callbacks[stage]) callbacks[stage]!(budgets[stage], stats, d);
-                timings[stage] = performance.now() - stageStart;
-            }
-        }
-    }
-
-    // Run remaining groups with degradation flags set
-    for (let g = 0; g < STAGE_GROUPS.length; g++) {
-        const group = STAGE_GROUPS[g];
-        const stage0 = group[0];
-
-        // Skip groups already processed before degradation was triggered
-        if (g <= STAGE_GROUPS.length / 2) {
-            _maybeYield(s, frameStart, g);
-        }
-        const d = degrade[stage0];
-        if (d & Degrade.SKIP) {
-            for (let i = 0; i < group.length; i++) timings[group[i]] = 0;
-            continue;
-        }
-
-        if (group.length === 1) {
-            stageStart = performance.now();
-            if (callbacks[stage0]) callbacks[stage0]!(budgets[stage0], stats, d);
-            timings[stage0] = performance.now() - stageStart;
-        } else if (s.groupDispatch) {
-            s.groupDispatch(group, stats, d);
-        } else {
-            for (let i = 0; i < group.length; i++) {
-                const stage = group[i];
-                const d2 = degrade[stage];
-                if (d2 & Degrade.SKIP) { timings[stage] = 0; continue; }
-                stageStart = performance.now();
-                if (callbacks[stage]) callbacks[stage]!(budgets[stage], stats, d2);
                 timings[stage] = performance.now() - stageStart;
             }
         }
