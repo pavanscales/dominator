@@ -164,7 +164,7 @@ export class DOMRenderer implements Renderer {
                     read += 10;
                     break;
                 case CmdType.BORDER:
-                    read += 4;
+                    read += 5;
                     break;
                 case CmdType.NOP:
                     read += 1;
@@ -343,6 +343,9 @@ export class CanvasRenderer implements Renderer {
                 case CmdType.RECT:
                     this._drawRect(ctx, buf, read);
                     read += 10;
+                    break;
+                case CmdType.BORDER:
+                    read += 5;
                     break;
                 case CmdType.NOP:
                     read += 1;

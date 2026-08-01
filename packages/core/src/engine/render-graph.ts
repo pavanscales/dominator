@@ -386,7 +386,7 @@ export function optimizeCommands(degrade: number = 0): void {
 }
 
 function _cmdSize(type: number): number {
-    const sizes = [1, 10, 4, 4, 5, 5, 4, 1, 1];
+    const sizes = [1, 10, 4, 5, 5, 5, 4, 1, 1];
     return sizes[type] || 1;
 }
 
