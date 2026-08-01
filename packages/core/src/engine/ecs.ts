@@ -434,14 +434,19 @@ export function spawn(parentId: number = -1): number {
     if (id < 0) return -1;
 
     w.parent[id] = parentId;
-    w.flags[id] = Flag.VISIBLE | Flag.NEEDS_LAYOUT | Flag.NEEDS_PAINT;
+    w.flags[id] = Flag.VISIBLE | Flag.NEEDS_LAYOUT | Flag.NEEDS_PAINT | Flag.DIRTY;
+    // Default opacity 1 — the render graph culls entities at opacity <= 0,
+    // and typed arrays zero-fill by default (0 would hide every entity).
+    w.style.floats[id * STYLE_FLOATS + STYLE_OPACITY] = 1;
     w.generation[id]++;
+    _addToDirtyList(w, id);
 
     if (parentId >= 0) {
         w.nextSibling[id] = w.children[parentId];
         w.children[parentId] = id;
         w.childCount[parentId]++;
         w.depth[id] = w.depth[parentId] + 1;
+        _markLayoutDirtyEntity(w, parentId);
     } else {
         w.depth[id] = 0;
     }
@@ -467,6 +472,7 @@ export function despawn(id: number): void {
                     w.nextSibling[prev] = w.nextSibling[id];
                 }
                 w.childCount[pid]--;
+                _markLayoutDirtyEntity(w, pid);
                 break;
             }
             prev = child;
@@ -604,8 +610,9 @@ export function setStyleFloat(entityId: number, offset: number, value: number): 
     const w = getWorld();
     w.style.floats[entityId * STYLE_FLOATS + offset] = value;
     const wasDirty = w.flags[entityId] & Flag.DIRTY;
-    w.flags[entityId] |= Flag.HAS_STYLE | Flag.DIRTY | Flag.NEEDS_LAYOUT;
+    w.flags[entityId] |= Flag.HAS_STYLE | Flag.DIRTY | Flag.NEEDS_LAYOUT | Flag.NEEDS_PAINT;
     if (!wasDirty) _addToDirtyList(w, entityId);
+    _markLayoutDirtyEntity(w, entityId);
 }
 
 export function getStyleFloat(entityId: number, offset: number): number {
@@ -653,12 +660,11 @@ export function getLayoutRect(entityId: number): { x: number; y: number; w: numb
     return { x: data[base], y: data[base + 1], w: data[base + 2], h: data[base + 3] };
 }
 
-export function markLayoutDirty(entityId: number): void {
-    const w = getWorld();
+function _markLayoutDirtyEntity(w: ECSWorld, entityId: number): void {
     const wasDirty = w.flags[entityId] & Flag.DIRTY;
     w.flags[entityId] |= Flag.NEEDS_LAYOUT | Flag.DIRTY;
     if (!wasDirty) _addToDirtyList(w, entityId);
-    // Propagate dirty up to parent
+    // Propagate dirty up to root so runLayout's root gate opens
     let pid = w.parent[entityId];
     while (pid >= 0) {
         if (w.flags[pid] & Flag.NEEDS_LAYOUT) break;
@@ -667,6 +673,10 @@ export function markLayoutDirty(entityId: number): void {
         if (!parentWasDirty) _addToDirtyList(w, pid);
         pid = w.parent[pid];
     }
+}
+
+export function markLayoutDirty(entityId: number): void {
+    _markLayoutDirtyEntity(getWorld(), entityId);
 }
 
 export function markPaintDirty(entityId: number): void {
