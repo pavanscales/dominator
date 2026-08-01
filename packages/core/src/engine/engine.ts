@@ -295,11 +295,14 @@ function _wireScheduler(
         return true;
     });
 
-    // ── Stage 9: COMMIT (0.5ms) — present + profile + arena reset ──
+    // ── Stage 9: COMMIT (0.5ms) — present + profile + arena reset + dirty clear ──
     registerStage(Stage.COMMIT, (_budget, stats) => {
         renderer.present();
         recordFrame(stats, renderer.drawCalls);
         arenaFrameReset();
+        // Dirty list was consumed by LAYOUT + PAINT this frame — clear flags so
+        // only genuinely re-modified entities re-emit commands next frame.
+        clearDirtyFlags();
         return true;
     });
 
