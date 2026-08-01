@@ -39,6 +39,7 @@ let _core: ReturnType<typeof getCore>;
 let _u32!: Uint32Array;
 let _f64: Float64Array;
 let _initialized = false;
+let _viewRefreshRegistered = false;
 
 function _rebindViews(): void {
     _u32 = getU32View();
@@ -49,7 +50,10 @@ function _ensureCore(): void {
     if (_initialized) return;
     _core = getCore();
     _rebindViews();
-    onViewRefresh(_rebindViews);
+    if (!_viewRefreshRegistered) {
+        onViewRefresh(_rebindViews);
+        _viewRefreshRegistered = true;
+    }
     _initialized = true;
 }
 
