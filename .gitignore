@@ -23,6 +23,15 @@ Desktop.ini
 # Test output
 coverage/
 
+# Zig build cache & artifacts
+/packages/core/src/zig/.zig-cache/
+/packages/core/src/zig/dist/
+/packages/core/src/dist/
+/packages/core/src/zig/dominator_core_test.wasm*
+/packages/core/src/zig/test_wasm.wasm*
+/packages/core/test_shared.wasm*
+test_export2.o.o
+
 # Lock artifacts
 nul
 pnpm-lock.yaml
