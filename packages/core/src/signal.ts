@@ -323,12 +323,26 @@ let _jsDirtyBitmap = new Uint32Array(_JS_BITMAP_WORDS);
 let _jsDirtyList = new Int32Array(8192);
 let _jsDirtyCount = 0;
 let _jsBatchDepth = 0;
+let _jsMaxDirtyWord = 0;
 
 function _jsMarkDirty(id: number): void {
     const word = id >>> 5;
+    if (word >= _jsDirtyBitmap.length) {
+        let newLen = _jsDirtyBitmap.length;
+        while (newLen <= word) newLen *= 2;
+        const nb = new Uint32Array(newLen);
+        nb.set(_jsDirtyBitmap);
+        _jsDirtyBitmap = nb;
+    }
+    if (_jsDirtyCount >= _jsDirtyList.length) {
+        const nl = new Int32Array(_jsDirtyList.length * 2);
+        nl.set(_jsDirtyList);
+        _jsDirtyList = nl;
+    }
     const mask = 1 << (id & 31);
     const wasClean = (_jsDirtyBitmap[word] & mask) === 0;
     _jsDirtyBitmap[word] |= mask;
+    if (word > _jsMaxDirtyWord) _jsMaxDirtyWord = word;
     if (wasClean) {
         _jsDirtyList[_jsDirtyCount++] = id;
     }
@@ -492,10 +506,8 @@ function _syncDirty(): void {
     if (count === 0) return;
     const list = _jsDirtyList;
     _jsDirtyCount = 0;
-
-    for (let i = 0; i < count; i++) {
-        _jsDirtyBitmap[list[i] >>> 5] = 0;
-    }
+    _jsDirtyBitmap.fill(0, 0, _jsMaxDirtyWord + 1);
+    _jsMaxDirtyWord = 0;
 
     _batchGen++;
     const gen = _batchGen;
@@ -886,6 +898,7 @@ export const _resetSignals = (): void => {
     _jsDirtyList = new Int32Array(8192);
     _jsDirtyCount = 0;
     _jsBatchDepth = 0;
+    _jsMaxDirtyWord = 0;
     _dirtyEffBuf = new Int32Array(2048);
     // Direct-effect storage (v8)
     _directEff = new Array(2048);
