@@ -390,6 +390,15 @@ function _ensureEffects(id: number): void {
     const newDisposed = new Uint8Array(capped);
     newDisposed.set(_effectDisposed.subarray(0, oldLen));
     _effectDisposed = newDisposed;
+
+    if (capped > _batchSeenGen.length) {
+        const ns = new Uint32Array(capped);
+        ns.set(_batchSeenGen.subarray(0, _batchSeenGen.length));
+        _batchSeenGen = ns;
+    }
+    if (capped > _dirtyEffBuf.length) {
+        _dirtyEffBuf = new Int32Array(capped);
+    }
 }
 
 function _ensureManualSubSlots(id: number): void {
@@ -484,12 +493,8 @@ function _runEffectList(ids: number[], count: number): void {
 
     for (let i = 0; i < count; i++) {
         const eid = ids[i];
-        if (eid < 8192) {
-            if (seen[eid] !== gen) {
-                seen[eid] = gen;
-                _runEffect(eid);
-            }
-        } else {
+        if (seen[eid] !== gen) {
+            seen[eid] = gen;
             _runEffect(eid);
         }
     }
@@ -523,19 +528,9 @@ function _syncDirty(): void {
         const dirFn = _directEff[sigId];
         if (dirFn !== undefined) {
             const effId = _directEffFirst[sigId];
-            if (effId >= 0) {
-                if (effId < 8192) {
-                    if (seen[effId] !== gen) {
-                        seen[effId] = gen;
-                        if (effCount < 2048) {
-                            effBuf[effCount++] = effId;
-                        }
-                    }
-                } else {
-                    if (effCount < 2048) {
-                        effBuf[effCount++] = effId;
-                    }
-                }
+            if (effId >= 0 && seen[effId] !== gen) {
+                seen[effId] = gen;
+                effBuf[effCount++] = effId;
             }
             continue;
         }
@@ -546,17 +541,9 @@ function _syncDirty(): void {
         const data = _subsData;
         for (let j = 0; j < len; j++) {
             const effId = data[ptr + j];
-            if (effId < 8192) {
-                if (seen[effId] !== gen) {
-                    seen[effId] = gen;
-                    if (effCount < 2048) {
-                        effBuf[effCount++] = effId;
-                    }
-                }
-            } else {
-                if (effCount < 2048) {
-                    effBuf[effCount++] = effId;
-                }
+            if (seen[effId] !== gen) {
+                seen[effId] = gen;
+                effBuf[effCount++] = effId;
             }
         }
     }
