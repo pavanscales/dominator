@@ -94,6 +94,18 @@ export interface CodegenOptions {
     aggressive?: boolean; // New flag for maximum aggression mode
 }
 
+function _hasInlineEvents(instrs: Instruction[]): boolean {
+    for (let i = 0; i < instrs.length; i++) {
+        const ins = instrs[i]!;
+        if (ins.op === 'event') {
+            const val = ins.args[1];
+            if (typeof val === 'string' && val.startsWith('{') && val.endsWith('}')) return true;
+        }
+        if (ins.nested && _hasInlineEvents(ins.nested)) return true;
+    }
+    return false;
+}
+
 export const codegen = (instructions: Instruction[], options: CodegenOptions | string = {}): string => {
     const opts = typeof options === 'string' ? { functionName: options } : options;
     const functionName = opts.functionName ?? 'render';
@@ -105,6 +117,9 @@ export const codegen = (instructions: Instruction[], options: CodegenOptions | s
 
     parts.push(`import { effect } from '@dominator/core';\n`);
     parts.push(`import * as stateModule from '${stateImportPath}';\n\n`);
+    if (_hasInlineEvents(instructions)) {
+        parts.push('const _bind = (el: Element, type: string, handler: (e: any) => void) => el.addEventListener(type, handler as EventListener);\n\n');
+    }
     parts.push(`export const ${functionName} = () => {\n`);
     parts.push('  const state = stateModule;\n');
     if (idents.length > 0) {
@@ -182,7 +197,7 @@ function _genBlock(parts: string[], instrs: Instruction[], indent: string, aggre
                     if (!validateExpression(expr)) {
                         throw new Error(`[dominator] Dangerous expression blocked in event handler: ${expr}`);
                     }
-                    parts.push(`${indent}${target}.addEventListener(${_escapeStringArg(String(event))}, ${expr});\n`);
+                    parts.push(`${indent}_bind(${target}, ${_escapeStringArg(String(event))}, ${expr});\n`);
                 } else {
                     parts.push(`${indent}${target}.addEventListener(${_escapeStringArg(String(event))}, ${_escapeStringArg(String(value))});\n`);
                 }
