@@ -17,6 +17,7 @@ import {
     getCore,
     getU32View,
     getF64View,
+    onViewRefresh,
 } from './wasm-glue';
 
 import {
@@ -38,12 +39,21 @@ let _core: ReturnType<typeof getCore>;
 let _u32!: Uint32Array;
 let _f64: Float64Array;
 let _initialized = false;
+let _viewRefreshRegistered = false;
+
+function _rebindViews(): void {
+    _u32 = getU32View();
+    _f64 = getF64View();
+}
 
 function _ensureCore(): void {
     if (_initialized) return;
     _core = getCore();
-    _u32 = getU32View();
-    _f64 = getF64View();
+    _rebindViews();
+    if (!_viewRefreshRegistered) {
+        onViewRefresh(_rebindViews);
+        _viewRefreshRegistered = true;
+    }
     _initialized = true;
 }
 
@@ -323,12 +333,26 @@ let _jsDirtyBitmap = new Uint32Array(_JS_BITMAP_WORDS);
 let _jsDirtyList = new Int32Array(8192);
 let _jsDirtyCount = 0;
 let _jsBatchDepth = 0;
+let _jsMaxDirtyWord = 0;
 
 function _jsMarkDirty(id: number): void {
     const word = id >>> 5;
+    if (word >= _jsDirtyBitmap.length) {
+        let newLen = _jsDirtyBitmap.length;
+        while (newLen <= word) newLen *= 2;
+        const nb = new Uint32Array(newLen);
+        nb.set(_jsDirtyBitmap);
+        _jsDirtyBitmap = nb;
+    }
+    if (_jsDirtyCount >= _jsDirtyList.length) {
+        const nl = new Int32Array(_jsDirtyList.length * 2);
+        nl.set(_jsDirtyList);
+        _jsDirtyList = nl;
+    }
     const mask = 1 << (id & 31);
     const wasClean = (_jsDirtyBitmap[word] & mask) === 0;
     _jsDirtyBitmap[word] |= mask;
+    if (word > _jsMaxDirtyWord) _jsMaxDirtyWord = word;
     if (wasClean) {
         _jsDirtyList[_jsDirtyCount++] = id;
     }
@@ -376,6 +400,15 @@ function _ensureEffects(id: number): void {
     const newDisposed = new Uint8Array(capped);
     newDisposed.set(_effectDisposed.subarray(0, oldLen));
     _effectDisposed = newDisposed;
+
+    if (capped > _batchSeenGen.length) {
+        const ns = new Uint32Array(capped);
+        ns.set(_batchSeenGen.subarray(0, _batchSeenGen.length));
+        _batchSeenGen = ns;
+    }
+    if (capped > _dirtyEffBuf.length) {
+        _dirtyEffBuf = new Int32Array(capped);
+    }
 }
 
 function _ensureManualSubSlots(id: number): void {
@@ -470,12 +503,8 @@ function _runEffectList(ids: number[], count: number): void {
 
     for (let i = 0; i < count; i++) {
         const eid = ids[i];
-        if (eid < 8192) {
-            if (seen[eid] !== gen) {
-                seen[eid] = gen;
-                _runEffect(eid);
-            }
-        } else {
+        if (seen[eid] !== gen) {
+            seen[eid] = gen;
             _runEffect(eid);
         }
     }
@@ -492,10 +521,8 @@ function _syncDirty(): void {
     if (count === 0) return;
     const list = _jsDirtyList;
     _jsDirtyCount = 0;
-
-    for (let i = 0; i < count; i++) {
-        _jsDirtyBitmap[list[i] >>> 5] = 0;
-    }
+    _jsDirtyBitmap.fill(0, 0, _jsMaxDirtyWord + 1);
+    _jsMaxDirtyWord = 0;
 
     _batchGen++;
     const gen = _batchGen;
@@ -511,19 +538,9 @@ function _syncDirty(): void {
         const dirFn = _directEff[sigId];
         if (dirFn !== undefined) {
             const effId = _directEffFirst[sigId];
-            if (effId >= 0) {
-                if (effId < 8192) {
-                    if (seen[effId] !== gen) {
-                        seen[effId] = gen;
-                        if (effCount < 2048) {
-                            effBuf[effCount++] = effId;
-                        }
-                    }
-                } else {
-                    if (effCount < 2048) {
-                        effBuf[effCount++] = effId;
-                    }
-                }
+            if (effId >= 0 && seen[effId] !== gen) {
+                seen[effId] = gen;
+                effBuf[effCount++] = effId;
             }
             continue;
         }
@@ -534,17 +551,9 @@ function _syncDirty(): void {
         const data = _subsData;
         for (let j = 0; j < len; j++) {
             const effId = data[ptr + j];
-            if (effId < 8192) {
-                if (seen[effId] !== gen) {
-                    seen[effId] = gen;
-                    if (effCount < 2048) {
-                        effBuf[effCount++] = effId;
-                    }
-                }
-            } else {
-                if (effCount < 2048) {
-                    effBuf[effCount++] = effId;
-                }
+            if (seen[effId] !== gen) {
+                seen[effId] = gen;
+                effBuf[effCount++] = effId;
             }
         }
     }
@@ -886,6 +895,7 @@ export const _resetSignals = (): void => {
     _jsDirtyList = new Int32Array(8192);
     _jsDirtyCount = 0;
     _jsBatchDepth = 0;
+    _jsMaxDirtyWord = 0;
     _dirtyEffBuf = new Int32Array(2048);
     // Direct-effect storage (v8)
     _directEff = new Array(2048);
@@ -949,7 +959,11 @@ export function signalArray(count: number, initialValue: number = 0): SignalArra
         baseId,
 
         get(i: number): number {
-            return _f64[baseId + i];
+            const id = baseId + i;
+            if (_activeEffect >= 0) {
+                _trackSignal(id);
+            }
+            return _f64[id];
         },
 
         set(i: number, value: number): void {
@@ -1008,27 +1022,15 @@ export function signalArray(count: number, initialValue: number = 0): SignalArra
 
         setValues(values: Float32Array | Float64Array | number[]): void {
             const len = values.length < count ? values.length : count;
-            let changed = false;
-
-            if (values instanceof Float64Array) {
-                _f64.set(values.subarray(0, len), baseId);
-                changed = true;
-            } else {
-                for (let i = 0; i < len; i++) {
-                    const id = baseId + i;
-                    const val = values[i];
-                    if (_f64[id] !== val) {
-                        _f64[id] = val;
-                        changed = true;
-                    }
-                }
-            }
-
-            if (!changed) return;
 
             _jsBatchDepth++;
             for (let i = 0; i < len; i++) {
-                _jsMarkDirty(baseId + i);
+                const id = baseId + i;
+                const val = values[i];
+                if (_f64[id] !== val) {
+                    _f64[id] = val;
+                    _jsMarkDirty(id);
+                }
             }
             _jsBatchDepth--;
 
