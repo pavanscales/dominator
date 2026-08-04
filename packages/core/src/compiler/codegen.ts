@@ -214,7 +214,7 @@ function _genBlock(parts: string[], instrs: Instruction[], indent: string, aggre
                     }
                     parts.push(`${indent}_bind(${target}, ${_escapeStringArg(String(event))}, ${expr});\n`);
                 } else {
-                    parts.push(`${indent}${target}.addEventListener(${_escapeStringArg(String(event))}, ${_escapeStringArg(String(value))});\n`);
+                    parts.push(`${indent}_bind(${target}, ${_escapeStringArg(String(event))}, ${String(value)});\n`);
                 }
                 break;
             }
