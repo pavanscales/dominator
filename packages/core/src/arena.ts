@@ -145,6 +145,8 @@ export function arenaWriteObj(id: number, value: unknown): boolean {
         if (oldObj !== undefined) {
             _objectReverseMap.delete(oldObj);
         }
+        // Clean up old forward mapping to prevent memory leak
+        _objectMap.delete(oldObjectId);
     }
     let newObjectId = _objectReverseMap.get(value);
     if (newObjectId === undefined) {
