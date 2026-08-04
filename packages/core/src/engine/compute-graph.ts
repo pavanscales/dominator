@@ -293,6 +293,14 @@ function _ensureEntityIndex(entityId: number): void {
 function _linkEntityNode(nodeId: number, entityId: number): void {
     if (entityId < 0) return;
     _ensureEntityIndex(entityId);
+    // Ensure _entityToNodeNext is large enough for this nodeId
+    if (nodeId >= _entityToNodeNext.length) {
+        const newLen = Math.max(nodeId + 256, _entityToNodeNext.length * 2);
+        const nn = new Int32Array(newLen);
+        nn.fill(-1, _entityToNodeNext.length);
+        nn.set(_entityToNodeNext);
+        _entityToNodeNext = nn;
+    }
     _entityToNodeNext[nodeId] = _entityToNodeHead[entityId];
     _entityToNodeHead[entityId] = nodeId;
 }
