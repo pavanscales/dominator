@@ -125,6 +125,10 @@ export function arenaWriteStr(id: number, value: string): boolean {
     const oldValue = _slotStringMap.get(id);
     if (oldValue === value) return false;
     _slotStringMap.set(id, value);
+    const core = getCore();
+    const { ptr, len } = writeStringToWasm(value);
+    const newStrId = core.arena_alloc_str(ptr, len);
+    core.arena_write_num(id, newStrId);
     return true;
 }
 
