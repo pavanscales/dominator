@@ -14,18 +14,21 @@ const EVENT_COUNT = EVENT_TYPES.length;
 
 // O(1) event type lookup via charCode dispatch (avoids Map lookup entirely)
 function _typeIndex(type: string): number {
-    const c0 = type.charCodeAt(0);
-    const c1 = type.charCodeAt(1);
-    if (c0 === 99) return c1 === 108 ? 0 : 2;
-    if (c0 === 105) return 1;
-    if (c0 === 115) return 3;
-    if (c0 === 107) return 4;
+    if (type === 'click') return 0;
+    if (type === 'input') return 1;
+    if (type === 'change') return 2;
+    if (type === 'submit') return 3;
+    if (type === 'keydown') return 4;
+    if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+        console.warn(`[dominator] Unknown event type: "${type}". Supported: click, input, change, submit, keydown`);
+    }
     return -1;
 }
 
 // ── Flat handler storage: nodeId → typeIndex → handler ─────────────────
 let _handlerFns: ((e: Event) => void)[] = new Array(1024);
 let _handlerCount = 0;
+let _freeFnIds: number[] = [];
 // Flat 2D array: _nodeHandlersFlat[nodeId * EVENT_COUNT + typeIdx] = fnId
 let _nodeHandlersFlat: Int32Array = new Int32Array(256 * EVENT_COUNT);
 let _nodeHandlersCap = 256;
@@ -122,13 +125,18 @@ export const addEventListener = (el: Node, type: string, fn: Function): void => 
         _ensureNodeSlot(nodeId);
     }
 
-    // Store handler in flat array
-    const fnId = _handlerCount++;
-    if (fnId >= _handlerFns.length) {
-        const newLen = Math.max(_handlerFns.length * 2, 2048);
-        const newFns = new Array(newLen);
-        for (let i = 0; i < _handlerFns.length; i++) newFns[i] = _handlerFns[i];
-        _handlerFns = newFns;
+    // Store handler in flat array — recycle free slot if available
+    let fnId: number;
+    if (_freeFnIds.length > 0) {
+        fnId = _freeFnIds.pop()!;
+    } else {
+        fnId = _handlerCount++;
+        if (fnId >= _handlerFns.length) {
+            const newLen = Math.max(_handlerFns.length * 2, 2048);
+            const newFns = new Array(newLen);
+            for (let i = 0; i < _handlerFns.length; i++) newFns[i] = _handlerFns[i];
+            _handlerFns = newFns;
+        }
     }
     _handlerFns[fnId] = fn as (e: Event) => void;
     _nodeHandlersFlat[nodeId * EVENT_COUNT + typeIdx] = fnId;
@@ -141,7 +149,13 @@ export const removeEventListener = (el: Node, type: string): void => {
     if (typeIdx < 0) return;
     const nodeId = (el as any)[DID_PROP] as number | undefined;
     if (nodeId !== undefined) {
+        const fnId = _nodeHandlersFlat[nodeId * EVENT_COUNT + typeIdx];
         _nodeHandlersFlat[nodeId * EVENT_COUNT + typeIdx] = -1;
+        // Clear handler reference to prevent memory leak
+        if (fnId >= 0 && fnId < _handlerFns.length) {
+            _handlerFns[fnId] = undefined!;
+            _freeFnIds.push(fnId);
+        }
         // Clear bitmask bit
         _nodeEventMask[nodeId] &= ~(1 << typeIdx);
     }
@@ -152,7 +166,12 @@ export const removeAllEventListeners = (el: Node): void => {
     if (nodeId !== undefined) {
         const base = nodeId * EVENT_COUNT;
         for (let i = 0; i < EVENT_COUNT; i++) {
+            const fnId = _nodeHandlersFlat[base + i];
             _nodeHandlersFlat[base + i] = -1;
+            if (fnId >= 0 && fnId < _handlerFns.length) {
+                _handlerFns[fnId] = undefined!;
+                _freeFnIds.push(fnId);
+            }
         }
         _nodeEventMask[nodeId] = 0;
     }
