@@ -214,10 +214,12 @@ async function _waitForEffects(): Promise<void> {
                 const fn = _effectFns[effId];
                 if (fn) fn();
             }
-            // Tell worker we consumed them
-            Atomics.store(_header!, HEADER_PENDING_COUNT, 0);
-            Atomics.store(_header!, HEADER_CMD, STATUS_READY);
-            Atomics.notify(_header!, 0);
+            // Atomically decrement only the count we consumed
+            const prev = Atomics.sub(_header!, HEADER_PENDING_COUNT, count);
+            if (prev === count) {
+                Atomics.store(_header!, HEADER_CMD, STATUS_READY);
+                Atomics.notify(_header!, 0);
+            }
             return;
         }
 
