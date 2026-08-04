@@ -123,6 +123,10 @@ export function readSignalF64(signalId: number): number {
 function _pushCmd(cmd: number, ...args: number[]): void {
     if (!_shared) return;
     const wh = _cmdWriteHead;
+    const rh = Atomics.load(_header!, HEADER_CMD_RHEAD);
+    const needed = 1 + args.length;
+    const available = CMD_QUEUE_SIZE - ((wh - rh) & CMD_QUEUE_MASK);
+    if (needed > available) return; // Queue full, drop command
     let w = wh;
     _shared[CMD_QUEUE_OFFSET + (w & CMD_QUEUE_MASK)] = cmd;
     w++;
@@ -184,17 +188,18 @@ export function bridgeBatchEnd(): void {
 // ── Zero-latency listener: Atomics.waitAsync wakes on notify ──────────
 
 async function _startListening(): Promise<void> {
-    while (_active && !_waiting) {
-        _waiting = true;
+    if (_waiting) return;
+    _waiting = true;
 
+    while (_active) {
         // Wait for worker to notify us (effects pending or shutdown)
-        // Atomics.waitAsync returns a promise that resolves when
-        // Atomics.notify is called on the same location
-        const asyncResult = Atomics.waitAsync(_header!, HEADER_CMD, STATUS_READY);
+        Atomics.waitAsync(_header!, HEADER_CMD, STATUS_READY);
 
-        // Also check for effects_pending status
+        // Process any pending effects
         await _waitForEffects();
     }
+
+    _waiting = false;
 }
 
 async function _waitForEffects(): Promise<void> {
