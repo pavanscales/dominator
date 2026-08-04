@@ -5,7 +5,7 @@
  *   Rect, Text, Border, Shadow, Transform, Clip
  *
  * The render graph processes ONLY dirty+NEEDS_PAINT entities.
- * Command buffer is a fixed ring buffer — reset just moves the head pointer.
+ * Command buffer is a pre-allocated linear buffer — reset moves the head pointer.
  * String interning uses a persistent table with generation-based eviction.
  *
  * ZERO-ALLOCATION GUARANTEES:
@@ -101,7 +101,7 @@ const _gpuCmdBuf = new Float32Array(GPU_CMD_BUF_FLOATS);
 let _gpuCmdHead = 0;
 
 function _emitGPUVertex(px: number, py: number, r: number, g: number, b: number, a: number): void {
-    // Convert pixel-space → NDC inline (zero CPU translation at render time)
+    if (_gpuCmdHead + 6 > GPU_CMD_BUF_FLOATS) return;
     const nx = (px / _canvasWidth) * 2 - 1;
     const ny = 1 - (py / _canvasHeight) * 2;
     const w = _gpuCmdHead;
@@ -162,29 +162,63 @@ function _intern(str: string): number {
         }
     }
 
-    // Evict unused if full
+    // Evict unused if full — also clear hash table entries
     if (_strTableLen >= MAX_STRINGS) {
         for (let i = 0; i < _strTableLen; i++) {
             if (_strLastUsed[i] < _strGen - 2) {
+                const evictedStr = _strTable[i];
                 _strTable[i] = '';
+                // Clear the hash entry for the evicted string using its own hash
+                const evictedProbe = _hashStr(evictedStr) % _strHashCap;
+                for (let j = 0; j < 16; j++) {
+                    const slot = (evictedProbe + j) % _strHashCap;
+                    if (_strHashVals[slot] === i) {
+                        _strHashVals[slot] = -1;
+                        break;
+                    }
+                }
             }
         }
     }
 
-    // Insert new
-    const id = _strTableLen < MAX_STRINGS ? _strTableLen++ : 0;
+    // Insert new — find a free slot via hash probe
+    let id = _strTableLen < MAX_STRINGS ? _strTableLen++ : -1;
+    if (id === -1) {
+        // Table full and no eviction freed a slot — overwrite slot 0
+        id = 0;
+        _strTable[0] = str;
+        _strLastUsed[0] = _strGen;
+        // Clear old hash entry for slot 0
+        for (let j = 0; j < _strHashCap; j++) {
+            if (_strHashVals[j] === 0) { _strHashVals[j] = -1; }
+        }
+        // Insert new hash entry
+        for (let i = 0; i < 16; i++) {
+            const slot = (probe + i) % _strHashCap;
+            if (_strHashVals[slot] === -1 || _strHashKeys[slot] === hash) {
+                _strHashKeys[slot] = hash;
+                _strHashVals[slot] = 0;
+                return 0;
+            }
+        }
+        return 0;
+    }
     _strTable[id] = str;
     _strLastUsed[id] = _strGen;
 
+    // Always insert into hash table — find any available slot
     for (let i = 0; i < 16; i++) {
         const slot = (probe + i) % _strHashCap;
         if (_strHashVals[slot] === -1 || _strHashKeys[slot] === hash) {
             _strHashKeys[slot] = hash;
             _strHashVals[slot] = id;
-            break;
+            return id;
         }
     }
-
+    // All 16 probes occupied — insert at the starting probe slot (best-effort)
+    const fallbackSlot = probe % _strHashCap;
+    _strHashKeys[fallbackSlot] = hash;
+    _strHashVals[fallbackSlot] = id;
     return id;
 }
 
@@ -193,6 +227,7 @@ function _intern(str: string): number {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function _emit4(type: CmdType, a: number, b: number, c: number, d: number): void {
+    if (_cmdHead + 5 > CMD_BUF_SIZE) return;
     const w = _cmdHead;
     _cmdBuf[w] = type;
     _cmdBuf[w + 1] = a;
@@ -203,6 +238,7 @@ function _emit4(type: CmdType, a: number, b: number, c: number, d: number): void
 }
 
 function _emit8(type: CmdType, a: number, b: number, c: number, d: number, e: number, f: number, g: number): void {
+    if (_cmdHead + 8 > CMD_BUF_SIZE) return;
     const w = _cmdHead;
     _cmdBuf[w] = type;
     _cmdBuf[w + 1] = a;
@@ -231,23 +267,20 @@ let _rg: RenderGraph = { commandCount: 0, cullCount: 0, mergeCount: 0, batchCoun
 export function buildRenderGraph(degrade: number = 0): RenderGraph {
     const w = getWorld();
     _rg = { commandCount: 0, cullCount: 0, mergeCount: 0, batchCount: 0 };
+
+    // REUSE: replay previous frame's frozen command buffer
+    if (degrade & 4) {
+        if (_frozenCommandCount > 0) {
+            _rg.commandCount = _frozenCommandCount;
+            return _rg;
+        }
+    }
+
     _cmdHead = 0;
     _cmdTail = 0;
     _floatHead = 0;
     _gpuCmdHead = 0;
     _strGen++;
-
-    // REUSE: replay previous frame's frozen command buffer
-    if (degrade & 4) {
-        if (_frozenCommandCount > 0) {
-            _cmdHead = _frozenHead;
-            _cmdTail = _frozenTail;
-            _gpuCmdHead = _frozenGPUHead;
-            _rg.commandCount = _frozenCommandCount;
-            return _rg;
-        }
-        // Fall through to normal build if no frozen commands exist
-    }
 
     // Process ONLY dirty+NEEDS_PAINT entities — O(dirty) not O(total)
     const dirtyList = _getDirtyList();
@@ -310,10 +343,12 @@ const opacityPacked = (opacity * 1000) | 0;
         bgRgba,
         ((borderRadius * 10) << 16) | ((borderWidth * 10) & 0xFFFF),
     );
-    const w2 = _cmdHead;
-    _cmdBuf[w2] = borderRgba;
-    _cmdBuf[w2 + 1] = opacityPacked;
-    _cmdHead = w2 + 2;
+    if (_cmdHead + 2 <= CMD_BUF_SIZE) {
+        const w2 = _cmdHead;
+        _cmdBuf[w2] = borderRgba;
+        _cmdBuf[w2 + 1] = opacityPacked;
+        _cmdHead = w2 + 2;
+    }
 
 _rg.commandCount++;
 
