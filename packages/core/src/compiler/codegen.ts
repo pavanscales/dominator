@@ -140,6 +140,10 @@ export const codegen = (instructions: Instruction[], options: CodegenOptions | s
     return parts.join('');
 };
 
+function _toCamelCase(str: string): string {
+    return str.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+}
+
 function _escapeStringArg(val: string): string {
     return JSON.stringify(val);
 }
@@ -157,7 +161,7 @@ function _genBlock(parts: string[], instrs: Instruction[], indent: string, aggre
                 const keyStr = String(key);
 
                 if (aggressive && keyStr.startsWith('style:')) {
-                    const styleProp = keyStr.split(':')[1];
+                    const styleProp = _toCamelCase(keyStr.split(':')[1]);
                     if (typeof value === 'string' && value.startsWith('{') && value.endsWith('}')) {
                         const expr = value.slice(1, -1);
                         if (!validateExpression(expr)) {
