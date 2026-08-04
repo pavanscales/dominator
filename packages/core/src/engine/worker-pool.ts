@@ -59,6 +59,14 @@ export interface WorkerPool {
 
 let _pool: WorkerPool | null = null;
 
+// Main thread callback registry for worker-dispatched callbacks
+const _workerCallbacks: ((data: number) => void)[] = [];
+
+export function registerWorkerCallback(id: number, fn: (data: number) => void): void {
+    while (_workerCallbacks.length <= id) _workerCallbacks.push(undefined!);
+    _workerCallbacks[id] = fn;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // WORKER ENTRY SOURCE
 // ═══════════════════════════════════════════════════════════════════════════
@@ -139,8 +147,11 @@ function _popJob() {
             var id = sharedView[base + 1];
             var data = sharedView[base + 2];
             var priority = sharedView[base + 3];
-            Atomics.store(sharedView, 0, (head + 1) & QUEUE_MASK);
-            return { type: type, id: id, data: data, priority: priority };
+            // CAS to prevent two workers from popping the same job
+            if (Atomics.compareExchange(sharedView, 0, head, (head + 1) & QUEUE_MASK) === head) {
+                return { type: type, id: id, data: data, priority: priority };
+            }
+            // CAS failed — another worker got it, retry on next poll
         }
     }
 
@@ -176,6 +187,21 @@ function _poll() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export function createWorkerPool(maxWorkers?: number): WorkerPool {
+    // Guard against environments without Worker/URL support (e.g. jsdom)
+    if (typeof Worker === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+        const empty: WorkerPool = {
+            workers: [],
+            maxWorkers: 0,
+            sharedBuffer: new SharedArrayBuffer(64),
+            sharedView: new Int32Array(16),
+            running: false,
+            totalSubmitted: 0,
+            totalCompleted: 0,
+        };
+        _pool = empty;
+        return empty;
+    }
+
     const hw = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 4 : 4;
     const numWorkers = maxWorkers ?? Math.max(1, hw - 1);
 
@@ -195,6 +221,14 @@ export function createWorkerPool(maxWorkers?: number): WorkerPool {
 
         // Allocate per-worker deque
         const dequeBuffer = new SharedArrayBuffer(DEQUE_TOTAL * 4);
+
+        worker.onmessage = (e: MessageEvent) => {
+            const msg = e.data;
+            if (msg.type === 'exec' && typeof msg.callbackId === 'number') {
+                const cb = _workerCallbacks[msg.callbackId];
+                if (cb) cb(msg.data);
+            }
+        };
 
         worker.postMessage({
             type: 'init',
@@ -356,16 +390,10 @@ export function destroyWorkerPool(): void {
         w.postMessage({ type: 'stop' });
     }
 
-    // Wait briefly for workers to exit, then terminate
-    setTimeout(() => {
-        if (_pool) {
-            for (const w of _pool.workers) {
-                w.terminate();
-            }
-            _pool = null;
-        }
-    }, 100);
-
+    // Synchronously terminate workers — no race with setTimeout
+    for (const w of _pool.workers) {
+        w.terminate();
+    }
     _pool = null;
 }
 
