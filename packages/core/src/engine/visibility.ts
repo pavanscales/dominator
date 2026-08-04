@@ -172,11 +172,17 @@ export function runVisibilityStage(skipFallback: boolean = false): { visible: nu
             const lw = Math.max(layout[base + LAYOUT_W], 0);
             const lh = Math.max(layout[base + LAYOUT_H], 0);
 
-            if (lx + lw >= v.viewportX && lx <= v.viewportX + v.viewportW &&
-                ly + lh >= v.viewportY && ly <= v.viewportY + v.viewportH) {
+            const inViewport = lx + lw >= v.viewportX && lx <= v.viewportX + v.viewportW &&
+                ly + lh >= v.viewportY && ly <= v.viewportY + v.viewportH;
+            if (inViewport) {
                 if (!(flags & Flag.VISIBLE)) {
                     w.flags[i] = flags | Flag.VISIBLE;
                     visibleCount++;
+                }
+            } else {
+                if (flags & Flag.VISIBLE) {
+                    w.flags[i] = flags & ~Flag.VISIBLE;
+                    culledCount++;
                 }
             }
         }
