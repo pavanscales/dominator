@@ -290,8 +290,15 @@ export class Parser {
         const tagName = parts[0];
         if (tagName === 'each') {
             const asIndex = parts.indexOf('as');
-            const expression = parts.slice(1, asIndex).join(' ');
-            const context = parts.slice(asIndex + 1).join(' ');
+            let expression: string;
+            let context: string;
+            if (asIndex === -1) {
+                expression = parts.slice(1).join(' ');
+                context = '';
+            } else {
+                expression = parts.slice(1, asIndex).join(' ');
+                context = parts.slice(asIndex + 1).join(' ');
+            }
             const children = this._parseChildren();
             this._advance();
             return { type: 'Each', expression, context, children, loc: t.loc };
