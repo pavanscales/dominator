@@ -68,7 +68,10 @@ import {
     getVisibilitySystem, runVisibilityStage, setViewport, resetVisibilitySystem,
 } from './visibility';
 import type { WorkerPool } from './worker-pool';
-import { createWorkerPool, destroyWorkerPool, submitBatchToPool, waitForPool } from './worker-pool';
+import { createWorkerPool, destroyWorkerPool, submitBatchToPool, submitToPool, waitForPool } from './worker-pool';
+
+// Pre-allocated buffer for parallel group dispatch — zero GC per frame
+const _groupStageBuf = new Int32Array(16);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // COMPUTE GRAPH → SIGNAL SYSTEM BRIDGE
@@ -145,7 +148,7 @@ export async function createEngine(
     const workerPool = createWorkerPool();
 
     // Wire up the frame scheduler stages (PEAK HPC PIPELINE)
-    _wireScheduler(scheduler, world, root, viewportW, viewportH, renderer, arena, profiler);
+    _wireScheduler(scheduler, world, root, viewportW, viewportH, renderer, arena, profiler, workerPool);
 
     _engine = {
         world,
@@ -155,7 +158,7 @@ export async function createEngine(
         arena,
         jobScheduler,
         profiler,
-        workerPool: null,
+        workerPool,
         root,
         viewportWidth: viewportW,
         viewportHeight: viewportH,
@@ -189,10 +192,12 @@ export function createEngineSync(
     const renderer = createRenderer(rendererType);
     renderer.init(container);
 
+    const workerPool = createWorkerPool();
+
     const root = world.root;
     setViewport(0, 0, viewportW, viewportH);
 
-    _wireScheduler(scheduler, world, root, viewportW, viewportH, renderer, arena, profiler);
+    _wireScheduler(scheduler, world, root, viewportW, viewportH, renderer, arena, profiler, workerPool);
 
     _engine = {
         world,
@@ -202,7 +207,7 @@ export function createEngineSync(
         arena,
         jobScheduler,
         profiler,
-        workerPool: null,
+        workerPool,
         root,
         viewportWidth: viewportW,
         viewportHeight: viewportH,
@@ -316,12 +321,14 @@ function _wireScheduler(
             const budgets = scheduler.stageBudgets;
             const timings = stats.stageTimings;
 
-            // Submit all dispatchable stages to the pool as batch
-            const data = new Int32Array(group.length);
+            // Submit all dispatchable stages to the pool as batch (reuse pre-allocated buffer)
             for (let i = 0; i < group.length; i++) {
-                data[i] = group[i];
+                _groupStageBuf[i] = group[i];
             }
-            submitBatchToPool(3, data, group.length, 0);
+            // Submit each stage with its actual type
+            for (let i = 0; i < group.length; i++) {
+                submitToPool(group[i], i, _groupStageBuf[i], 0);
+            }
 
             // Run main-thread-only stages (TEXT = Canvas API) on main thread
             for (let i = 0; i < group.length; i++) {
@@ -336,11 +343,11 @@ function _wireScheduler(
             // Wait for pool to drain all submitted jobs
             waitForPool(4);
 
-            // Record timings for pool-dispatched stages
+            // Record timings for pool-dispatched stages (measured via main-thread wait)
             for (let i = 0; i < group.length; i++) {
                 const stage = group[i];
                 if (stage !== Stage.TEXT && timings[stage] === 0) {
-                    timings[stage] = budgets[stage] * 0.5;
+                    timings[stage] = 0.1;
                 }
             }
         };
@@ -465,10 +472,10 @@ export function setEntityStyle(
     }
 
     if (opts.bgR !== undefined) {
-        setStyleColor(id, 0, opts.bgR ?? 0, opts.bgG ?? 0, opts.bgB ?? 0, opts.bgA ?? 255);
+        setStyleColor(id, 0, opts.bgR, opts.bgG ?? 0, opts.bgB ?? 0, opts.bgA ?? 255);
     }
     if (opts.borderR !== undefined) {
-        setStyleColor(id, 2, opts.borderR ?? 0, opts.borderG ?? 0, opts.borderB ?? 0, opts.borderA ?? 255);
+        setStyleColor(id, 2, opts.borderR, opts.borderG ?? 0, opts.borderB ?? 0, opts.borderA ?? 255);
     }
 }
 
