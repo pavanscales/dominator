@@ -89,7 +89,6 @@ let _stageHistory: Float64Array[] = [];
 for (let i = 0; i < NUM_STAGES; i++) {
     _stageHistory.push(new Float64Array(MAX_FRAME_HISTORY));
 }
-let _stageHistoryWriteIdx = 0;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // P99 COMPUTATION — pre-allocated sort buffer, incremental
@@ -98,6 +97,7 @@ let _stageHistoryWriteIdx = 0;
 let _p99SortBuffer = new Float64Array(MAX_FRAME_HISTORY);
 let _runningSum = 0;
 let _runningWorst = 0;
+let _stageSums = new Float64Array(NUM_STAGES);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SCHEDULER METRICS
@@ -281,11 +281,21 @@ function _maybeYield(s: FrameScheduler, frameStart: number, groupIdx: number): v
 
 function _pushFrameTime(frameTime: number, stageTimings: Float64Array): void {
     const idx = _historyWriteIdx & MAX_FRAME_HISTORY_MASK;
+
+    // Subtract old value from running sum when ring buffer overwrites
+    if (_historyCount >= MAX_FRAME_HISTORY) {
+        _runningSum -= _historyBuffer[idx];
+        for (let i = 0; i < NUM_STAGES; i++) {
+            _stageSums[i] -= _stageHistory[i][idx];
+        }
+    }
+
     _historyBuffer[idx] = frameTime;
 
     // Per-stage timing history
     for (let i = 0; i < NUM_STAGES; i++) {
         _stageHistory[i][idx] = stageTimings[i];
+        _stageSums[i] += stageTimings[i];
     }
 
     _historyWriteIdx++;
@@ -521,7 +531,6 @@ export function resetMetrics(): void {
     _historyCount = 0;
     _runningSum = 0;
     _runningWorst = 0;
-    _stageHistoryWriteIdx = 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
