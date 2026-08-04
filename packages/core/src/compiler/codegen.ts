@@ -182,7 +182,18 @@ function _genBlock(parts: string[], instrs: Instruction[], indent: string, aggre
                         parts.push(`${indent}${target}.${keyStr} = ${JSON.stringify(value)};\n`);
                     }
                 } else {
-                    if (typeof value === 'string' && value.startsWith('{') && value.endsWith('}')) {
+                    if (keyStr.startsWith('style:')) {
+                        const styleProp = _toCamelCase(keyStr.split(':')[1]);
+                        if (typeof value === 'string' && value.startsWith('{') && value.endsWith('}')) {
+                            const expr = value.slice(1, -1);
+                            if (!validateExpression(expr)) {
+                                throw new Error(`[dominator] Dangerous expression blocked in style attribute: ${expr}`);
+                            }
+                            parts.push(`${indent}effect(() => { ${target}.style[${JSON.stringify(styleProp)}] = String(${expr}); });\n`);
+                        } else {
+                            parts.push(`${indent}${target}.style[${JSON.stringify(styleProp)}] = ${JSON.stringify(value)};\n`);
+                        }
+                    } else if (typeof value === 'string' && value.startsWith('{') && value.endsWith('}')) {
                         const expr = value.slice(1, -1);
                         if (!validateExpression(expr)) {
                             throw new Error(`[dominator] Dangerous expression blocked in attribute: ${expr}`);
