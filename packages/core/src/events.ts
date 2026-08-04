@@ -38,7 +38,7 @@ let _nodeEventMask: Uint8Array = new Uint8Array(256);
 let _nodeEventMaskCap = 256;
 
 // ── Bubble path: single pre-allocated array ────────────────────────────
-const _bubblePath: Node[] = new Array(128);
+let _bubblePath: Node[] = new Array(128);
 let _bubblePathLen = 128;
 
 // DOM node ID property name (hidden, non-enumerable)
@@ -52,7 +52,11 @@ export const setupDelegation = (root: Node): void => {
         while (target && target !== root) {
             if (depth >= _bubblePathLen) {
                 if (_bubblePathLen < 2048) {
-                    _bubblePathLen = Math.min(_bubblePathLen * 2, 2048);
+                    const newLen = Math.min(_bubblePathLen * 2, 2048);
+                    const newPath = new Array(newLen);
+                    for (let j = 0; j < _bubblePathLen; j++) newPath[j] = _bubblePath[j];
+                    _bubblePath = newPath;
+                    _bubblePathLen = newLen;
                 } else {
                     break;
                 }
