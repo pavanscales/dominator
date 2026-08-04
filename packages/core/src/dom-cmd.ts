@@ -76,9 +76,12 @@ function _evictStrings(): void {
     const gen = _strGen;
     const lu = _strLastUsed!;
     let evictCount = 0;
-    for (let i = 0; i < _strTable.length; i++) {
+    const limit = Math.min(_strTable.length, MAX_STRINGS);
+    for (let i = 0; i < limit; i++) {
         if (lu[i] < gen - 2) {
-            _evictScratch[evictCount++] = i;
+            if (evictCount < MAX_STRINGS) {
+                _evictScratch[evictCount++] = i;
+            }
         }
     }
     for (let j = 0; j < evictCount; j++) {
