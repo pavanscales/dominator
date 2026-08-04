@@ -6,6 +6,8 @@ const _JS_KEYWORDS = new Set([
     'let', 'var', 'for', 'while', 'do', 'switch', 'case', 'break',
     'continue', 'class', 'extends', 'super', 'import', 'export', 'default',
     'try', 'catch', 'finally', 'throw', 'async', 'await', 'yield',
+    'in', 'with', 'debugger', 'enum', 'implements', 'interface', 'package',
+    'private', 'protected', 'public', 'static',
 ]);
 
 const _DANGEROUS_PATTERNS = [
