@@ -1,17 +1,30 @@
 import { signal, Signal } from './signal';
+import { removeAllEventListeners } from './events';
 
 export const path: Signal<string> = signal(
     typeof window !== 'undefined' ? window.location.pathname : '/'
 );
 
+let _popstateHandler: (() => void) | null = null;
+
 if (typeof window !== 'undefined') {
-    window.addEventListener('popstate', () => {
+    _popstateHandler = () => {
         path.set(window.location.pathname);
-    });
+    };
+    window.addEventListener('popstate', _popstateHandler);
+}
+
+export function teardownRouter(): void {
+    if (typeof window !== 'undefined' && _popstateHandler) {
+        window.removeEventListener('popstate', _popstateHandler);
+        _popstateHandler = null;
+    }
 }
 
 export const navigate = (to: string): void => {
-    window.history.pushState({}, '', to);
+    if (typeof window !== 'undefined') {
+        window.history.pushState({}, '', to);
+    }
     path.set(to);
 };
 
@@ -95,6 +108,7 @@ export const createRouter = (routes: Route[]): HTMLElement => {
         if (route) {
             const nextElement = route.component();
             if (currentElement) {
+                removeAllEventListeners(currentElement);
                 root.replaceChild(nextElement, currentElement);
             } else {
                 root.appendChild(nextElement);
