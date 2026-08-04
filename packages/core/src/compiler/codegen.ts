@@ -40,7 +40,7 @@ function _collectIdentifiers(instructions: Instruction[]): string[] {
         if (!matches) return;
         for (let i = 0; i < matches.length; i++) {
             const m = matches[i]!;
-            if (!_JS_KEYWORDS.has(m) && m.length > 1) {
+            if (!_JS_KEYWORDS.has(m) && m.length >= 1) {
                 let start = 0;
                 let dominated = false;
                 while (start < stripped.length) {
