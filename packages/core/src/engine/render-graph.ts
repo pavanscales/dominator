@@ -333,6 +333,9 @@ const opacityPacked = (opacity * 1000) | 0;
     const bgB = (bgRgba >> 8) & 0xFF;
     const bgA = bgRgba & 0xFF;
 
+    // Check if there's room for the full 10-word RECT command before writing
+    if (_cmdHead + 10 > CMD_BUF_SIZE) return;
+
     _emit8(
         CmdType.RECT,
         entityId,
@@ -343,7 +346,7 @@ const opacityPacked = (opacity * 1000) | 0;
         bgRgba,
         ((borderRadius * 10) << 16) | ((borderWidth * 10) & 0xFFFF),
     );
-    if (_cmdHead + 2 <= CMD_BUF_SIZE) {
+    {
         const w2 = _cmdHead;
         _cmdBuf[w2] = borderRgba;
         _cmdBuf[w2 + 1] = opacityPacked;
