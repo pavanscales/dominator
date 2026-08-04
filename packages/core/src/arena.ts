@@ -87,11 +87,14 @@ export function arenaReadStr(id: number): string {
     const u32 = getU32View();
 
     const stringId = Math.trunc(core.arena_read_num(id));
+    if (stringId < 0) return '';
     const metaBase = 16384 + stringId * 2;
+    if (metaBase + 1 >= u32.length) return '';
     const wordOffset = u32[metaBase];
     const byteLen = u32[metaBase + 1];
 
     const byteStart = wordOffset * 4;
+    if (byteStart + byteLen > u8.length) return '';
 
     // Zero-copy: decode directly from WASM memory subarray
     if (byteLen <= _strBuf.length) {
