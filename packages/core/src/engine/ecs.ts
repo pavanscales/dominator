@@ -142,6 +142,7 @@ export interface ECSWorld {
 }
 
 let _world: ECSWorld | null = null;
+let _sharedBuffer: SharedArrayBuffer | null = null;
 
 const INITIAL_CAP = 4096;
 const GROW_FACTOR = 2;
@@ -378,8 +379,6 @@ export function createSharedWorld(maxCapacity: number = 16384): ECSWorld {
     return w;
 }
 
-let _sharedBuffer: SharedArrayBuffer | null = null;
-
 export function getWorldSharedBuffer(): SharedArrayBuffer | null {
     return _sharedBuffer;
 }
@@ -457,6 +456,7 @@ export function spawn(parentId: number = -1): number {
 export function despawn(id: number): void {
     const w = getWorld();
     if (id <= 0 || id >= w.count) return;
+    if (w.flags[id] & Flag.REMOVED) return;
 
     // Detach from parent
     const pid = w.parent[id];
@@ -480,12 +480,32 @@ export function despawn(id: number): void {
         }
     }
 
-    // Recursively despawn children
+    // Iteratively despawn all descendants using a pre-allocated stack
+    _despawnStackTop = 0;
     let child = w.children[id];
     while (child >= 0) {
-        const next = w.nextSibling[child];
-        despawn(child);
-        child = next;
+        if (_despawnStackTop < 16384) {
+            _despawnStack[_despawnStackTop++] = child;
+        }
+        child = w.nextSibling[child];
+    }
+    while (_despawnStackTop > 0) {
+        const current = _despawnStack[--_despawnStackTop];
+        // Push this entity's children onto the stack
+        let ch = w.children[current];
+        while (ch >= 0) {
+            if (_despawnStackTop < 16384) {
+                _despawnStack[_despawnStackTop++] = ch;
+            }
+            ch = w.nextSibling[ch];
+        }
+        // Despawn the entity itself (leaf first)
+        w.flags[current] = Flag.REMOVED;
+        w.parent[current] = -1;
+        w.children[current] = -1;
+        w.nextSibling[current] = -1;
+        w.childCount[current] = 0;
+        w.freeList[w.freeCount++] = current;
     }
 
     // Mark as removed
@@ -539,11 +559,16 @@ export function setParent(childId: number, newParentId: number): void {
 }
 
 function _updateSubtreeDepth(w: ECSWorld, id: number): void {
-    let child = w.children[id];
-    while (child >= 0) {
-        w.depth[child] = w.depth[id] + 1;
-        _updateSubtreeDepth(w, child);
-        child = w.nextSibling[child];
+    const stack = [id];
+    let ptr = 0;
+    while (ptr < stack.length) {
+        const current = stack[ptr++];
+        let child = w.children[current];
+        while (child >= 0) {
+            w.depth[child] = w.depth[current] + 1;
+            stack.push(child);
+            child = w.nextSibling[child];
+        }
     }
 }
 
@@ -693,6 +718,10 @@ export function markPaintDirty(entityId: number): void {
 // Pre-allocated stack for DFS traversal — typed array, zero GC
 const _dfsStack = new Int32Array(16384);
 let _dfsStackTop = 0;
+
+// Pre-allocated stack for despawn traversal — zero GC
+const _despawnStack = new Int32Array(16384);
+let _despawnStackTop = 0;
 
 export function forEachChild(parentId: number, fn: (entityId: number) => void): void {
     const w = getWorld();
