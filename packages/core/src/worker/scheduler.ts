@@ -63,13 +63,13 @@ export function createSharedLayout(maxParticles: number): SharedLayout {
 }
 
 export function getParticlePos(layout: SharedLayout, index: number, out: { x: number; y: number }): void {
-    const base = HEADER_SIZE + index * FLOATS_PER_PARTICLE;
+    const base = index * FLOATS_PER_PARTICLE;
     out.x = layout.positions[base];
     out.y = layout.positions[base + 1];
 }
 
 export function getParticleColor(layout: SharedLayout, index: number): { r: number; g: number; b: number; a: number } {
-    const base = HEADER_SIZE + index * FLOATS_PER_PARTICLE + 4;
+    const base = index * FLOATS_PER_PARTICLE + 4;
     return {
         r: layout.positions[base],
         g: layout.positions[base + 1],
