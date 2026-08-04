@@ -558,15 +558,20 @@ export function setParent(childId: number, newParentId: number): void {
     _updateSubtreeDepth(w, childId);
 }
 
+const _depthUpdateStack = new Int32Array(16384);
+let _depthUpdateTop = 0;
+
 function _updateSubtreeDepth(w: ECSWorld, id: number): void {
-    const stack = [id];
-    let ptr = 0;
-    while (ptr < stack.length) {
-        const current = stack[ptr++];
+    _depthUpdateTop = 0;
+    _depthUpdateStack[_depthUpdateTop++] = id;
+    while (_depthUpdateTop > 0) {
+        const current = _depthUpdateStack[--_depthUpdateTop];
         let child = w.children[current];
         while (child >= 0) {
             w.depth[child] = w.depth[current] + 1;
-            stack.push(child);
+            if (_depthUpdateTop < 16384) {
+                _depthUpdateStack[_depthUpdateTop++] = child;
+            }
             child = w.nextSibling[child];
         }
     }
