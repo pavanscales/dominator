@@ -118,16 +118,22 @@ function _getElemId(node: Node): number {
         } else {
             // Table full — scan for stale slot (generation older than current frame)
             id = -1;
+            let oldestGen = _elemGen;
+            let oldestIdx = -1;
             for (let i = 1; i < MAX_ELEM_IDS; i++) {
                 if (_elemIdGen[i] < _elemGen) {
                     id = i;
                     break;
                 }
+                if (_elemIdGen[i] < oldestGen) {
+                    oldestGen = _elemIdGen[i];
+                    oldestIdx = i;
+                }
             }
             if (id === -1) {
                 // All slots actively used this frame — evict oldest
-                id = 1;
-                const old = _elemIds[1];
+                id = oldestIdx !== -1 ? oldestIdx : 1;
+                const old = _elemIds[id];
                 if (old && old !== node) {
                     delete (old as any)[DID_PROP];
                 }
