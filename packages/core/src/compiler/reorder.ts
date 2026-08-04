@@ -81,7 +81,7 @@ export function reorderInstructions(instructions: Instruction[]): Instruction[] 
                 appends.push(ins);
                 break;
             case 'expr':
-                dynamicExprs.push(ins);
+                creates.push(ins);
                 break;
             case 'each':
             case 'if':
