@@ -131,12 +131,13 @@ function _popJob(): Job | null {
         if (head === tail) return null;
 
         const base = HEADER_SIZE + head * JOB_SIZE;
+        const jobId = _sharedView[base + 1];
         const job: Job = {
             type: _sharedView[base],
-            id: _sharedView[base + 1],
+            id: jobId,
             data: _sharedView[base + 2],
             priority: _sharedView[base + 3],
-            callback: null,
+            callback: _jobCallbacks[jobId] || null,
         };
 
         Atomics.store(_sharedView, 0, (head + 1) & QUEUE_MASK);
@@ -147,12 +148,13 @@ function _popJob(): Job | null {
     if (_localHead === _localTail) return null;
 
     const base = _localHead * JOB_SIZE;
+    const jobId = _localBuf[base + 1];
     const job: Job = {
         type: _localBuf[base],
-        id: _localBuf[base + 1],
+        id: jobId,
         data: _localBuf[base + 2],
         priority: _localBuf[base + 3],
-        callback: null,
+        callback: _jobCallbacks[jobId] || null,
     };
 
     _localHead = (_localHead + 1) & QUEUE_MASK;
@@ -255,6 +257,9 @@ export function submitJobBatch(type: JobType, dataArray: Int32Array, count: numb
 
 export function drainJobs(): number {
     let executed = 0;
+    const pending = getJobScheduler().pendingJobs;
+    const completed = getJobScheduler().completedJobs;
+
     let job = _popJob();
     while (job) {
         if (job.callback) {
@@ -262,28 +267,57 @@ export function drainJobs(): number {
             job.callback(job.data);
             getJobScheduler().totalWorkTime += performance.now() - start;
         }
-        getJobScheduler().completedJobs[job.type]++;
+        completed[job.type]++;
+        pending[job.type]--;
         getJobScheduler().totalJobsCompleted++;
         executed++;
         job = _popJob();
     }
+
     return executed;
 }
 
 export function drainJobsByType(type: JobType, maxJobs: number = Infinity): number {
     let executed = 0;
     let job = _popJob();
-    while (job && executed < maxJobs) {
+    const pending = getJobScheduler().pendingJobs;
+    const completed = getJobScheduler().completedJobs;
+    const totalCompleted = getJobScheduler().totalJobsCompleted;
+    const buffer = new Array(QUEUE_CAPACITY * JOB_SIZE);
+    let bufIdx = 0;
+
+    // Collect jobs of target type to execute, buffer others for re-queue
+    while (job) {
         if (job.type === type) {
             if (job.callback) {
                 job.callback(job.data);
             }
-            getJobScheduler().completedJobs[job.type]++;
-            getJobScheduler().totalJobsCompleted++;
+            completed[type]++;
             executed++;
+        } else {
+            // Non-matching job: buffer for re-queue after current type's drain
+            buffer[bufIdx++] = job.type;
+            buffer[bufIdx++] = job.id;
+            buffer[bufIdx++] = job.data;
+            buffer[bufIdx++] = job.priority;
         }
         job = _popJob();
     }
+
+    // Re-queue buffered non-matching jobs
+    for (let i = 0; i < bufIdx; i += 4) {
+        const qJob: Job = {
+            type: buffer[i],
+            id: buffer[i + 1],
+            data: buffer[i + 2],
+            priority: buffer[i + 3],
+            callback: null,
+        };
+        if (_pushJob(qJob)) {
+            pending[qJob.type]++;
+        }
+    }
+
     return executed;
 }
 
@@ -295,11 +329,23 @@ export function waitForType(type: JobType, timeoutMs: number = 100): boolean {
     const start = performance.now();
     const s = getJobScheduler();
     const targetCount = s.pendingJobs[type];
+    let lastCount = targetCount;
 
     while (s.completedJobs[type] < targetCount) {
-        drainJobsByType(type);
-        if (performance.now() - start > timeoutMs) {
-            return false;
+        const before = s.completedJobs[type];
+        drainJobsByType(type, Infinity);
+        const after = s.completedJobs[type];
+
+        if (before === after) {
+            // No progress, check timeout
+            if (performance.now() - start > timeoutMs) {
+                return false;
+            }
+            // Yield to avoid spinning
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+        } else {
+            // Progress made, continue
+            lastCount = targetCount - after;
         }
     }
     return true;
