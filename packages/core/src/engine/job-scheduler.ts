@@ -125,23 +125,27 @@ function _pushJob(job: Job): boolean {
 function _popJob(): Job | null {
     // Try shared buffer first
     if (_sharedView) {
-        const head = Atomics.load(_sharedView, 0);
-        const tail = Atomics.load(_sharedView, 1);
+        while (true) {
+            const head = Atomics.load(_sharedView, 0);
+            const tail = Atomics.load(_sharedView, 1);
 
-        if (head === tail) return null;
+            if (head === tail) return null;
 
-        const base = HEADER_SIZE + head * JOB_SIZE;
-        const jobId = _sharedView[base + 1];
-        const job: Job = {
-            type: _sharedView[base],
-            id: jobId,
-            data: _sharedView[base + 2],
-            priority: _sharedView[base + 3],
-            callback: _jobCallbacks[jobId] || null,
-        };
+            const base = HEADER_SIZE + head * JOB_SIZE;
+            const jobId = _sharedView[base + 1];
+            const job: Job = {
+                type: _sharedView[base],
+                id: jobId,
+                data: _sharedView[base + 2],
+                priority: _sharedView[base + 3],
+                callback: _jobCallbacks[jobId] || null,
+            };
 
-        Atomics.store(_sharedView, 0, (head + 1) & QUEUE_MASK);
-        return job;
+            const prev = Atomics.compareExchange(_sharedView, 0, head, (head + 1) & QUEUE_MASK);
+            if (prev === head) {
+                return job;
+            }
+        }
     }
 
     // Local ring buffer fallback
