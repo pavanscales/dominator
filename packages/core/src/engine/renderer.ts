@@ -96,13 +96,13 @@ export class DOMRenderer implements Renderer {
 
     // Pre-allocated style patching buffers — last known values per entity
     private _lastBg: Uint32Array = new Uint32Array(4096);
-    private _lastLeft = new Float32Array(4096);
-    private _lastTop = new Float32Array(4096);
-    private _lastWidth = new Float32Array(4096);
-    private _lastHeight = new Float32Array(4096);
-    private _lastBorderRadius = new Float32Array(4096);
-    private _lastBorderWidth = new Float32Array(4096);
-    private _lastBorderRgba = new Uint32Array(4096);
+    private _lastLeft: Float32Array = new Float32Array(4096);
+    private _lastTop: Float32Array = new Float32Array(4096);
+    private _lastWidth: Float32Array = new Float32Array(4096);
+    private _lastHeight: Float32Array = new Float32Array(4096);
+    private _lastBorderRadius: Float32Array = new Float32Array(4096);
+    private _lastBorderWidth: Float32Array = new Float32Array(4096);
+    private _lastBorderRgba: Uint32Array = new Uint32Array(4096);
     private _lastEntityCount = 0;
 
     init(container: HTMLElement): void {
@@ -195,8 +195,33 @@ export class DOMRenderer implements Renderer {
         // Track entity index for change detection
         let entityIdx = entityId;
         if (entityIdx >= this._lastEntityCount) {
-            // Expand tracking arrays
-            this._lastEntityCount = entityIdx + 256;
+            // Expand tracking arrays (ensure new cap is never smaller than existing)
+            const newCap = Math.max(entityIdx + 256, this._lastBg.length);
+            const prevBg = this._lastBg;
+            this._lastBg = new Uint32Array(newCap);
+            this._lastBg.set(prevBg);
+            const prevLeft = this._lastLeft;
+            this._lastLeft = new Float32Array(newCap);
+            this._lastLeft.set(prevLeft);
+            const prevTop = this._lastTop;
+            this._lastTop = new Float32Array(newCap);
+            this._lastTop.set(prevTop);
+            const prevW = this._lastWidth;
+            this._lastWidth = new Float32Array(newCap);
+            this._lastWidth.set(prevW);
+            const prevH = this._lastHeight;
+            this._lastHeight = new Float32Array(newCap);
+            this._lastHeight.set(prevH);
+            const prevBR = this._lastBorderRadius;
+            this._lastBorderRadius = new Float32Array(newCap);
+            this._lastBorderRadius.set(prevBR);
+            const prevBW = this._lastBorderWidth;
+            this._lastBorderWidth = new Float32Array(newCap);
+            this._lastBorderWidth.set(prevBW);
+            const prevBRgba = this._lastBorderRgba;
+            this._lastBorderRgba = new Uint32Array(newCap);
+            this._lastBorderRgba.set(prevBRgba);
+            this._lastEntityCount = newCap;
         }
 
         // Only patch style properties that changed — ZERO string comparison when unchanged
@@ -220,15 +245,15 @@ export class DOMRenderer implements Renderer {
             s.backgroundColor = _getRgbaString(bgRgba);
             this._lastBg[entityIdx] = bgRgba;
         }
-        if (borderRadius > 0 && this._lastBorderRadius[entityIdx] !== borderRadius) {
-            s.borderRadius = borderRadius + 'px';
+        if (this._lastBorderRadius[entityIdx] !== borderRadius) {
+            s.borderRadius = borderRadius > 0 ? borderRadius + 'px' : '';
             this._lastBorderRadius[entityIdx] = borderRadius;
         }
-        if (borderWidth > 0 && this._lastBorderWidth[entityIdx] !== borderWidth) {
+        if (this._lastBorderWidth[entityIdx] !== borderWidth) {
             const borderRgba = buf[(offset + 8) & 0xFFFFF];
-            s.borderWidth = borderWidth + 'px';
-            s.borderStyle = 'solid';
-            s.borderColor = _getRgbaString(borderRgba);
+            s.borderWidth = borderWidth > 0 ? borderWidth + 'px' : '';
+            s.borderStyle = borderWidth > 0 ? 'solid' : '';
+            s.borderColor = borderWidth > 0 ? _getRgbaString(borderRgba) : '';
             this._lastBorderWidth[entityIdx] = borderWidth;
             this._lastBorderRgba[entityIdx] = borderRgba;
         }
