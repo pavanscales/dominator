@@ -264,11 +264,18 @@ function _genBlock(parts: string[], instrs: Instruction[], indent: string, aggre
                 if (!validateExpression(expr)) {
                     throw new Error(`[dominator] Dangerous expression blocked in conditional: ${expr}`);
                 }
+                const fragVar = `${target}_f`;
+                parts.push(`${indent}const ${fragVar} = document.createDocumentFragment();\n`);
                 parts.push(`${indent}effect(() => {\n`);
+                parts.push(`${indent}  while (${fragVar}.firstChild) ${fragVar}.removeChild(${fragVar}.firstChild);\n`);
                 parts.push(`${indent}  if (${expr}) {\n`);
-                if (nested) { _genBlock(parts, nested, indent + '    ', aggressive); } // Pass aggressive flag
+                if (nested) { _genBlock(parts, nested, indent + '    ', aggressive); }
+                const created = nested ? new Set(nested.filter((n) => n.op === 'create' || n.op === 'text' || n.op === 'expr' || n.op === 'each').map((n) => n.target)) : new Set<string>();
+                const appended = nested ? new Set(nested.filter((n) => n.op === 'append').map((n) => n.args[0] as string)) : new Set<string>();
+                created.forEach((r) => { if (!appended.has(r)) parts.push(`${indent}    ${fragVar}.appendChild(${r});\n`); });
                 parts.push(`${indent}  }\n`);
                 parts.push(`${indent}});\n`);
+                parts.push(`${indent}${target}.appendChild(${fragVar});\n`);
                 break;
             }
             case 'hoisted': {
