@@ -118,7 +118,7 @@ export const codegen = (instructions: Instruction[], options: CodegenOptions | s
     const idents = _collectIdentifiers(instructions);
 
     parts.push(`import { effect } from '@dominator/core';\n`);
-    parts.push(`import * as stateModule from '${stateImportPath}';\n\n`);
+    parts.push(`import * as stateModule from ${JSON.stringify(stateImportPath)};\n\n`);
     if (_hasInlineEvents(instructions)) {
         parts.push('const _bind = (el: Element, type: string, handler: (e: any) => void) => el.addEventListener(type, handler as EventListener);\n\n');
     }
