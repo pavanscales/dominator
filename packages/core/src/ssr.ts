@@ -90,7 +90,7 @@ export const renderToString = (instructions: SSRInstruction[]): string => {
 
         if (frame.phase === 0) {
             push('<');
-            push(node.tag);
+            push(_escapeHtml(node.tag));
             const attrKeys = Object.keys(node.attrs);
             for (let i = 0; i < attrKeys.length; i++) {
                 push(' ');
