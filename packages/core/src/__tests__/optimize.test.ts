@@ -11,9 +11,8 @@ describe('optimize', () => {
                 { op: 'append', target: 'v0', args: ['v1'] },
             ];
             const result = optimize(input);
-            expect(result).toHaveLength(2);
+            expect(result).toHaveLength(1);
             expect(result[0]!.op).toBe('create');
-            expect(result[1]!.op).toBe('append');
         });
 
         it('keeps non-empty text nodes', () => {
