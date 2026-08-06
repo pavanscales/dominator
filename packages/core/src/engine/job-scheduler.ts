@@ -82,6 +82,9 @@ const _localBuf = new Int32Array(QUEUE_CAPACITY * JOB_SIZE);
 let _localHead = 0;
 let _localTail = 0;
 
+// Pre-allocated buffer for drainJobsByType — avoids massive allocation per call
+const _drainTypeBuf = new Int32Array(QUEUE_CAPACITY * JOB_SIZE);
+
 function _ensureShared(): Int32Array {
     if (_sharedView) return _sharedView;
     _sharedBuffer = new SharedArrayBuffer(TOTAL_SHARED_SIZE * 4);
@@ -287,7 +290,6 @@ export function drainJobsByType(type: JobType, maxJobs: number = Infinity): numb
     const pending = getJobScheduler().pendingJobs;
     const completed = getJobScheduler().completedJobs;
     const totalCompleted = getJobScheduler().totalJobsCompleted;
-    const buffer = new Array(QUEUE_CAPACITY * JOB_SIZE);
     let bufIdx = 0;
 
     // Collect jobs of target type to execute, buffer others for re-queue
@@ -297,29 +299,29 @@ export function drainJobsByType(type: JobType, maxJobs: number = Infinity): numb
                 job.callback(job.data);
             }
             completed[type]++;
+            pending[type]--;
             executed++;
+            getJobScheduler().totalJobsCompleted++;
         } else {
             // Non-matching job: buffer for re-queue after current type's drain
-            buffer[bufIdx++] = job.type;
-            buffer[bufIdx++] = job.id;
-            buffer[bufIdx++] = job.data;
-            buffer[bufIdx++] = job.priority;
+            _drainTypeBuf[bufIdx++] = job.type;
+            _drainTypeBuf[bufIdx++] = job.id;
+            _drainTypeBuf[bufIdx++] = job.data;
+            _drainTypeBuf[bufIdx++] = job.priority;
         }
         job = _popJob();
     }
 
-    // Re-queue buffered non-matching jobs
+    // Re-queue buffered non-matching jobs (pending already counted from original submitJob)
     for (let i = 0; i < bufIdx; i += 4) {
         const qJob: Job = {
-            type: buffer[i],
-            id: buffer[i + 1],
-            data: buffer[i + 2],
-            priority: buffer[i + 3],
+            type: _drainTypeBuf[i],
+            id: _drainTypeBuf[i + 1],
+            data: _drainTypeBuf[i + 2],
+            priority: _drainTypeBuf[i + 3],
             callback: null,
         };
-        if (_pushJob(qJob)) {
-            pending[qJob.type]++;
-        }
+        _pushJob(qJob);
     }
 
     return executed;
@@ -345,8 +347,7 @@ export function waitForType(type: JobType, timeoutMs: number = 100): boolean {
             if (performance.now() - start > timeoutMs) {
                 return false;
             }
-            // Yield to avoid spinning
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+            // No-op yield — Atomics.wait is forbidden on the main thread in browsers
         } else {
             // Progress made, continue
             lastCount = targetCount - after;
