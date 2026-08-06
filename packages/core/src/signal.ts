@@ -155,7 +155,25 @@ function _ensureSubsData(needed: number): void {
     _subsDataCap = newCap;
 }
 
-function _addSub(sigId: number, effId: number): void {
+// Update where an effect's dep for `sigId` lives in the signal's subscriber
+// block. Called when swap-with-last removal relocates a subscriber, or when a
+// previously-direct subscriber first migrates into a block. O(deps of effect).
+function _setEffSlot(effId: number, sigId: number, newSlot: number): void {
+    const ptr = _effDepsPtr[effId];
+    if (ptr < 0) return;
+    const len = _effDepsLen[effId];
+    const data = _effDepsData;
+    for (let i = 0; i < len; i++) {
+        if (data[ptr + i] === sigId) {
+            _effDepsSlot[ptr + i] = newSlot;
+            return;
+        }
+    }
+}
+
+// Returns the block slot the subscriber now occupies, or -1 when it lives in
+// the single-subscriber direct cache (no block slot exists).
+function _addSub(sigId: number, effId: number): number {
     const ptr = _subsPtr[sigId];
     let len = _subsLen[sigId];
     let cap = _subsCap[sigId];
@@ -164,7 +182,7 @@ function _addSub(sigId: number, effId: number): void {
     const fn = _effectFns[effId];
     if (len === 0 && _directEff[sigId] === undefined) {
         _setDirectEff(sigId, effId, fn);
-        return;
+        return -1;
     }
 
     // First subscriber was direct — migrate to flat array
@@ -179,7 +197,9 @@ function _addSub(sigId: number, effId: number): void {
         _subsCap[sigId] = SUBS_GROW;
         _subsDataTop = newPtr + SUBS_GROW;
         _clearDirectEff(sigId);
-        return;
+        // The previously-direct subscriber now occupies block slot 0.
+        _setEffSlot(firstEffId, sigId, 0);
+        return 1;
     }
 
     if (cap === 0) {
@@ -191,13 +211,13 @@ function _addSub(sigId: number, effId: number): void {
         _subsLen[sigId] = 1;
         _subsCap[sigId] = SUBS_GROW;
         _subsDataTop = newPtr + SUBS_GROW;
-        return;
+        return 0;
     }
 
     if (len < cap) {
         _subsData[ptr + len] = effId;
         _subsLen[sigId] = len + 1;
-        return;
+        return len;
     }
 
     // Grow: allocate new block, copy
@@ -214,26 +234,47 @@ function _addSub(sigId: number, effId: number): void {
     _subsLen[sigId] = len + 1;
     _subsCap[sigId] = newCap;
     _subsDataTop = newPtr + newCap;
+    return len;
 }
 
-function _removeSub(sigId: number, effId: number): void {
-    // Check direct effect first (90% case — single subscriber)
-    if (_directEff[sigId] !== undefined && _directEffFirst[sigId] === effId) {
-        _clearDirectEff(sigId);
+// O(1) unlink using the slot index recorded in the effect's dep list. Swap
+// with the block's last subscriber so the block stays dense, and re-point the
+// relocated subscriber's own slot so its later removal is still O(1).
+function _removeSub(sigId: number, effId: number, slot: number): void {
+    // Single-subscriber direct cache — no block slot exists
+    if (slot === -1) {
+        if (_directEff[sigId] !== undefined && _directEffFirst[sigId] === effId) {
+            _clearDirectEff(sigId);
+        }
         return;
     }
 
-    // Flat subscriber array
     const ptr = _subsPtr[sigId];
     const len = _subsLen[sigId];
-    const data = _subsData;
-    for (let i = 0; i < len; i++) {
-        if (data[ptr + i] === effId) {
-            data[ptr + i] = data[ptr + len - 1];
-            _subsLen[sigId] = len - 1;
-            return;
+    if (ptr < 0 || len === 0) return;
+
+    if (slot >= len) {
+        // Defensive fallback: slot bookkeeping drifted, find it linearly.
+        const data = _subsData;
+        for (let i = 0; i < len; i++) {
+            if (data[ptr + i] === effId) {
+                const lastId = data[ptr + len - 1];
+                data[ptr + i] = lastId;
+                if (lastId !== effId) _setEffSlot(lastId, sigId, i);
+                _subsLen[sigId] = len - 1;
+                return;
+            }
         }
+        return;
     }
+
+    const data = _subsData;
+    const lastId = data[ptr + len - 1];
+    data[ptr + slot] = lastId;
+    if (lastId !== effId) {
+        _setEffSlot(lastId, sigId, slot);
+    }
+    _subsLen[sigId] = len - 1;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -248,6 +289,11 @@ let _effDepsPtr: Int32Array = new Int32Array(4096).fill(-1);
 let _effDepsLen: Uint16Array = new Uint16Array(4096);
 let _effDepsCap: Uint16Array = new Uint16Array(4096);
 let _effDepsData: Int32Array = new Int32Array(4096);
+// Parallel to _effDepsData: the slot index each dep occupies inside its
+// signal's subscriber block (-1 when it lives in the direct-effect cache).
+// Lets _removeSub unlink in O(1) instead of a linear scan, so fan-out
+// dispatch stops being O(n²).
+let _effDepsSlot: Int32Array = new Int32Array(4096).fill(-1);
 let _effDepsTop = 0;
 const DEPS_GROW = 4;
 let _effDepsDataCap = 4096;
@@ -272,12 +318,16 @@ function _ensureDepData(needed: number): void {
     if (needed < _effDepsDataCap) return;
     const newCap = Math.max(needed * 2, _effDepsDataCap * 2);
     const nd = new Int32Array(newCap);
+    const ns = new Int32Array(newCap);
+    ns.fill(-1);
     nd.set(_effDepsData);
+    ns.set(_effDepsSlot);
     _effDepsData = nd;
+    _effDepsSlot = ns;
     _effDepsDataCap = newCap;
 }
 
-function _addDep(effId: number, sigId: number): void {
+function _addDep(effId: number, sigId: number, slot: number): void {
     const ptr = _effDepsPtr[effId];
     let len = _effDepsLen[effId];
     let cap = _effDepsCap[effId];
@@ -286,6 +336,7 @@ function _addDep(effId: number, sigId: number): void {
         const newPtr = _effDepsTop;
         _ensureDepData(newPtr + DEPS_GROW);
         _effDepsData[newPtr] = sigId;
+        _effDepsSlot[newPtr] = slot;
         _effDepsPtr[effId] = newPtr;
         _effDepsLen[effId] = 1;
         _effDepsCap[effId] = DEPS_GROW;
@@ -295,6 +346,7 @@ function _addDep(effId: number, sigId: number): void {
 
     if (len < cap) {
         _effDepsData[ptr + len] = sigId;
+        _effDepsSlot[ptr + len] = slot;
         _effDepsLen[effId] = len + 1;
         return;
     }
@@ -305,9 +357,11 @@ function _addDep(effId: number, sigId: number): void {
     let j = 0;
     while (j < len) {
         _effDepsData[newPtr + j] = _effDepsData[ptr + j];
+        _effDepsSlot[newPtr + j] = _effDepsSlot[ptr + j];
         j++;
     }
     _effDepsData[newPtr + len] = sigId;
+    _effDepsSlot[newPtr + len] = slot;
     _effDepsPtr[effId] = newPtr;
     _effDepsLen[effId] = len + 1;
     _effDepsCap[effId] = newCap;
@@ -486,8 +540,8 @@ function _trackSignal(signalId: number): void {
     // No membership scan needed: _runEffect clears the effect's deps before the
     // body runs, so a first read of a signal in this run is ALWAYS a fresh
     // subscription. A scan could only ever miss, so it is pure dead work.
-    _addSub(signalId, effId);
-    _addDep(effId, signalId);
+    const slot = _addSub(signalId, effId);
+    _addDep(effId, signalId, slot);
     _lastTrackGen[signalId] = _subGen;
 }
 
@@ -498,8 +552,9 @@ function _jsClearDeps(effId: number): void {
     _effDepsLen[effId] = 0;
 
     const data = _effDepsData;
+    const slots = _effDepsSlot;
     for (let i = 0; i < len; i++) {
-        _removeSub(data[ptr + i], effId);
+        _removeSub(data[ptr + i], effId, slots[ptr + i]);
     }
 }
 
@@ -974,6 +1029,8 @@ export const _resetSignals = (): void => {
     _effDepsLen = new Uint16Array(4096);
     _effDepsCap = new Uint16Array(4096);
     _effDepsData = new Int32Array(4096);
+    _effDepsSlot = new Int32Array(4096);
+    _effDepsSlot.fill(-1);
     _effDepsTop = 0;
     _effDepsDataCap = 4096;
     _jsValueCache = new Array(4096);
