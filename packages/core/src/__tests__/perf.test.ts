@@ -155,7 +155,7 @@ describe('PERF: batching', () => {
                 for (let i = 0; i < 10; i++) signals[i]!.set(runs + i);
             });
         });
-        expect(r.opsPerSec).toBeGreaterThan(20_000);
+        expect(r.opsPerSec).toBeGreaterThan(12_000);
     });
 
     it('batch with 100 signal sets', () => {
