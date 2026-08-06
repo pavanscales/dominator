@@ -33,7 +33,7 @@ export interface CoreExports {
     subs_get_length(signal_id: number): number;
     subs_get_at(signal_id: number, index: number): number;
     subs_snapshot(signal_id: number, max_len: number): number;
-    signal_track(signal_id: number): void;
+    signal_track(signal_id: number): number;
     signal_mark_dirty(id: number): void;
     signal_flush_immediate(id: number): number;
     signal_flush_dirty(): number;
@@ -49,6 +49,10 @@ export interface CoreExports {
     arena_compact(live_bitmap: number): number;
 }
 
+// ESM-compatible require for Node.js-only sync file loading (vitest / Node.js test env)
+import { createRequire } from 'node:module';
+const _nodeRequire = createRequire(import.meta.url);
+
 // Memory layout constants (matching Zig module — bit-packed dirty bitmap saves 63K words)
 export const NUM_WORDS = 8192;
 export const TAG_START = 8192;
@@ -58,7 +62,8 @@ export const SUB_LENGTH_START = 28672;
 export const DIRTY_BITMAP_START = 53248;
 // Bit-packed: 65536 signals / 32 bits per word = 2048 words (was 65536 words)
 export const SNAPSHOT_BUF_START = 55296;
-export const DYNAMIC_START = 55808;
+// Snapshot region is 65536 words (matches dominator_core.zig SNAPSHOT_CAP)
+export const DYNAMIC_START = 120832;
 
 // Tag constants
 export const TAG_NUMBER = 0;
@@ -72,6 +77,8 @@ let _f64View: Float64Array | null = null;
 let _u32View: Uint32Array | null = null;
 let _u8View: Uint8Array | null = null;
 let _i32View: Int32Array | null = null;
+let _lastBuffer: ArrayBuffer | null = null;
+let _heapByteBase = 0;
 
 // Cached encoder — never allocate a new one
 const _encoder = new TextEncoder();
@@ -85,7 +92,10 @@ let _viewListeners: (() => void)[] = [];
 function _bindViews(): void {
     if (!_core || !_memory) return;
     const buf = _memory.buffer;
+    if (_lastBuffer === buf) return;
+    _lastBuffer = buf;
     const offset = _core.heap_base();
+    _heapByteBase = offset;
     _f64View = new Float64Array(buf, offset);
     _u32View = new Uint32Array(buf, offset);
     _u8View = new Uint8Array(buf, offset);
@@ -101,8 +111,8 @@ function _initAndBindViews(): void {
 
 function _trySyncLoad(): boolean {
     try {
-        const fs = require('node:fs') as typeof import('node:fs');
-        const path = require('node:path') as typeof import('node:path');
+        const fs = _nodeRequire('node:fs') as typeof import('node:fs');
+        const path = _nodeRequire('node:path') as typeof import('node:path');
         const cwd = process.cwd();
         const wasmPath = path.join(cwd, 'packages', 'core', 'dist', 'zig', 'dominator_core.wasm');
         if (!fs.existsSync(wasmPath)) return false;
@@ -112,6 +122,7 @@ function _trySyncLoad(): boolean {
         _memory = new WebAssembly.Memory({ initial: 1024, maximum: 8192 });
         const instance = new WebAssembly.Instance(wasmModule, { env: { memory: _memory } });
         _core = instance.exports as unknown as CoreExports;
+        _lastBuffer = null;
         _initAndBindViews();
         return true;
     } catch {
@@ -130,6 +141,7 @@ export function getCore(): CoreExports {
         if (!_memory) {
             _memory = (globalThis as any).__DOMINATOR_WASM_MEMORY__;
         }
+        _lastBuffer = null;
         _initAndBindViews();
         return _core!;
     }
@@ -185,6 +197,7 @@ export async function initCore(source?: WebAssembly.Module | string | URL): Prom
     const imports = { env: { memory: _memory } };
     const instance = await WebAssembly.instantiate(wasmModule, imports);
     _core = instance.exports as unknown as CoreExports;
+    _lastBuffer = null;
     _initAndBindViews();
     return _core!;
 }
@@ -198,8 +211,24 @@ export function initCoreSync(instance: WebAssembly.Instance, memory?: WebAssembl
     if (!_memory) {
         _memory = (globalThis as any).__DOMINATOR_WASM_MEMORY__ ?? null;
     }
+    _lastBuffer = null;
     _initAndBindViews();
     return _core!;
+}
+
+/**
+ * Grow the WASM heap by extra_words and re-bind all typed views.
+ *
+ * This MUST be used instead of calling heap_grow() directly: growing
+ * WebAssembly memory detaches the existing ArrayBuffer, so every cached
+ * typed view goes stale. refreshViews() re-binds them (and notifies
+ * listeners) atomically with the growth.
+ */
+export function growHeap(extraWords: number): number {
+    const core = getCore();
+    const result = core.heap_grow(extraWords);
+    refreshViews();
+    return result;
 }
 
 /**
@@ -224,6 +253,31 @@ export function onViewRefresh(fn: () => void): void {
 }
 
 /**
+ * Reinitialize the WASM instance from scratch (used after memory corruption).
+ * Creates a fresh WebAssembly.Memory + Instance and re-binds all views.
+ */
+export function reinitWasm(): CoreExports | null {
+    try {
+        const fs = _nodeRequire('node:fs') as typeof import('node:fs');
+        const path = _nodeRequire('node:path') as typeof import('node:path');
+        const cwd = process.cwd();
+        const wasmPath = path.join(cwd, 'packages', 'core', 'dist', 'zig', 'dominator_core.wasm');
+        if (!fs.existsSync(wasmPath)) return null;
+
+        const wasmBytes = fs.readFileSync(wasmPath);
+        const wasmModule = new WebAssembly.Module(wasmBytes);
+        _memory = new WebAssembly.Memory({ initial: 1024, maximum: 8192 });
+        const instance = new WebAssembly.Instance(wasmModule, { env: { memory: _memory } });
+        _core = instance.exports as unknown as CoreExports;
+        _lastBuffer = null;
+        _initAndBindViews();
+        return _core;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Write a UTF-8 string into WASM memory at a temporary region.
  * Returns a word index (not byte offset) that can be passed to arena_alloc_str.
  *
@@ -241,10 +295,36 @@ export function writeStringToWasm(str: string): { ptr: number; len: number } {
     const byteLen = written!;
 
     const u8 = getU8View();
-    const ptr = DYNAMIC_START;
+
+    // Staging scratch is consumed immediately by the subsequent arena_alloc_str,
+    // so it is safe to reuse: reset the offset before a write would cross the
+    // bound, keeping the staging region well below EFF_DEPS_REGION.
+    if (_strWriteOffset + byteLen > _STR_SCRATCH_LIMIT) {
+        _strWriteOffset = 0;
+    }
+
+    // DYNAMIC_START is a u32 word index; the staging byte offset must be scaled
+    // by 4. arena_alloc_str reads the source via @ptrFromInt, so we return the
+    // raw linear-memory byte address (view base + u8 index), not the view index.
+    const u8Index = (DYNAMIC_START * 4) + _strWriteOffset;
+    _strWriteOffset += byteLen;
 
     // Bulk copy — single TypedArray.set call
-    u8.set(_strWriteBuf.subarray(0, byteLen), ptr * 4);
+    u8.set(_strWriteBuf.subarray(0, byteLen), u8Index);
 
-    return { ptr, len: byteLen };
+    return { ptr: _heapByteBase + u8Index, len: byteLen };
+}
+
+let _strWriteOffset = 0;
+
+// EFF_DEPS_REGION starts at word DYNAMIC_START + 262144 (see signal.ts). Strings
+// stage in the byte region below it; the 64KB bound keeps every write far clear.
+const _STR_SCRATCH_LIMIT = 65536;
+
+export function _resetStrWriteOffset(): void {
+    _strWriteOffset = 0;
+}
+
+export function _getStrWriteOffset(): number {
+    return _strWriteOffset;
 }

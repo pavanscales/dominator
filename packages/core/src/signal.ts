@@ -1,33 +1,53 @@
 /**
- * Dominator Reactive Engine — BARE METAL EDITION (v6)
+ * Dominator Reactive Engine — BARE METAL EDITION (v7)
  *
- * Architecture: JS owns EVERYTHING on the hot path. WASM owns only arena allocation.
+ * Architecture: JS owns EVERYTHING on the hot path. WASM owns only number
+ * arena allocation (the f64 value view). Subscriber state, dependency state,
+ * the dirty set, and dispatch are all single-authority JS structures, so:
  *
- * BARE METAL OPTIMIZATIONS (v6):
+ *   - No WASM subscriber cap (the old 255-subscriber silent drop is gone).
+ *   - No cross-tier subscriber divergence to reconcile (the old
+ *     _clearDirectEffForDeps patchwork is gone).
+ *   - String/object/boolean values live in a JS value cache — the WASM string
+ *     arena path panicked (memcpyAlias) and leaked every write.
+ *
+ * BARE METAL OPTIMIZATIONS:
  * - Flat Int32Array subscriber storage per signal (contiguous, cache-friendly)
  * - Flat Int32Array dependency storage per effect (contiguous, cache-friendly)
  * - Per-signal _lastTrackGen for O(1) fast-path dedup in _trackSignal
- *   (eliminates linked-list traversal for all but the first signal read per effect run)
  * - ZERO WASM calls on signal.set() hot path
  * - Generation-based batch dedup
+ * - Single-subscriber direct-effect cache: signal.set() → _f64[fid]=val →
+ *   _directEff[fid]() = 3 array ops + 1 function call
  * - Pre-sized arrays with exponential growth, swap-with-last removal
  */
 
 import {
     getCore,
-    getU32View,
     getF64View,
     onViewRefresh,
+    reinitWasm,
+    _resetStrWriteOffset,
 } from './wasm-glue';
 
 import {
-    arenaAllocNum, arenaAllocStr, arenaAllocObj,
-    arenaReadStr, arenaReadObj, arenaReadBool,
-    arenaWriteStr, arenaWriteObj, arenaWriteBool,
+    arenaAllocNum,
     TAG_NUMBER, TAG_STRING, TAG_OBJECT,
 } from './arena';
 
 import { drainCmdBuffer, cmdBufferPending, _resetCmdBuffer } from './dom-cmd';
+import { markSignalDirty } from './engine/compute-graph';
+import { logError } from './logging';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ZIG CORE CONSTANTS — mirror dominator_core.zig memory layout
+//
+// The WASM arena owns NUMBER value storage only (ZIG_SIGNAL_CAP slots, viewed
+// via _f64). Subscriber/dependency/dispatch state is owned entirely by JS, so
+// there is exactly ONE authority for tracking and no WASM-side subscriber cap.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const ZIG_SIGNAL_CAP = 4096;          // INITIAL_CAP in dominator_core.zig — number arena bounds
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SIGNAL — flat storage, zero allocation
@@ -36,13 +56,11 @@ import { drainCmdBuffer, cmdBufferPending, _resetCmdBuffer } from './dom-cmd';
 type Subscriber = () => void;
 
 let _core: ReturnType<typeof getCore>;
-let _u32!: Uint32Array;
-let _f64: Float64Array;
+let _f64!: Float64Array;
 let _initialized = false;
 let _viewRefreshRegistered = false;
 
 function _rebindViews(): void {
-    _u32 = getU32View();
     _f64 = getF64View();
 }
 
@@ -58,16 +76,20 @@ function _ensureCore(): void {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// DIRECT-EFFECT SIGNALS — BARE METAL v8
+// DIRECT-EFFECT SIGNALS — BARE METAL
 //
 // For the 90% case (1 subscriber), store the effect callback DIRECTLY on
 // the signal, bypassing subscriber arrays AND the effect dispatch system.
-// signal.set() → _f64[fid]=val → _directEff[fid]() 
-// That's 3 array ops + 1 function call vs 7+ ops + 3 function calls in v7.
+// signal.set() → _f64[fid]=val → _directEff[fid]()
+// That's 3 array ops + 1 function call vs 7+ ops + 3 function calls.
+//
+// The cache is purely JS and is kept consistent by _addSub/_removeSub: any
+// migration between "direct" and "flat" goes through those two functions, so
+// there is never a second authority to reconcile.
 // ═══════════════════════════════════════════════════════════════════════════
 
 let _directEff: (() => void)[] = new Array(2048);
-let _directEffFirst: Int32Array = new Int32Array(2048); // effect ID for clean dep tracking
+let _directEffFirst: Int32Array = new Int32Array(2048).fill(-1); // effect ID for clean dep tracking
 
 function _ensureDirectEff(id: number): void {
     if (id < _directEff.length) return;
@@ -93,10 +115,9 @@ function _clearDirectEff(sigId: number): void {
     _directEffFirst[sigId] = -1;
 }
 
-let _subFirst: Int32Array = new Int32Array(2048);
-let _subsPtr: Int32Array = new Int32Array(2048);
-let _subsLen: Uint8Array = new Uint8Array(2048);
-let _subsCap: Uint8Array = new Uint8Array(2048);
+let _subsPtr: Int32Array = new Int32Array(2048).fill(-1);
+let _subsLen: Uint16Array = new Uint16Array(2048);
+let _subsCap: Uint16Array = new Uint16Array(2048);
 let _subsData: Int32Array = new Int32Array(4096);
 let _subsDataTop = 0;
 const SUBS_GROW = 8;
@@ -110,19 +131,15 @@ function _ensureSubs(signalId: number): void {
     if (signalId < _subsPtr.length) return;
     const old = _subsPtr.length;
     const newLen = Math.max(signalId + 512, old * 2);
-    const nf = new Int32Array(newLen);
     const np = new Int32Array(newLen);
-    const nl = new Uint8Array(newLen);
-    const nc = new Uint8Array(newLen);
+    const nl = new Uint16Array(newLen);
+    const nc = new Uint16Array(newLen);
     const nt = new Uint32Array(newLen);
-    nf.fill(-1, old);
     np.fill(-1, old);
-    nf.set(_subFirst.subarray(0, old));
     np.set(_subsPtr);
     nl.set(_subsLen);
     nc.set(_subsCap);
     nt.set(_lastTrackGen);
-    _subFirst = nf;
     _subsPtr = np;
     _subsLen = nl;
     _subsCap = nc;
@@ -157,7 +174,6 @@ function _addSub(sigId: number, effId: number): void {
         _ensureSubsData(newPtr + SUBS_GROW);
         _subsData[newPtr] = firstEffId;
         _subsData[newPtr + 1] = effId;
-        _subFirst[sigId] = firstEffId;
         _subsPtr[sigId] = newPtr;
         _subsLen[sigId] = 2;
         _subsCap[sigId] = SUBS_GROW;
@@ -171,7 +187,6 @@ function _addSub(sigId: number, effId: number): void {
         const newPtr = _subsDataTop;
         _ensureSubsData(newPtr + SUBS_GROW);
         _subsData[newPtr] = effId;
-        _subFirst[sigId] = effId;  // INLINE: cache first subscriber
         _subsPtr[sigId] = newPtr;
         _subsLen[sigId] = 1;
         _subsCap[sigId] = SUBS_GROW;
@@ -195,7 +210,6 @@ function _addSub(sigId: number, effId: number): void {
         j++;
     }
     _subsData[newPtr + len] = effId;
-    _subFirst[sigId] = _subsData[newPtr];  // INLINE: update first subscriber
     _subsPtr[sigId] = newPtr;
     _subsLen[sigId] = len + 1;
     _subsCap[sigId] = newCap;
@@ -206,7 +220,6 @@ function _removeSub(sigId: number, effId: number): void {
     // Check direct effect first (90% case — single subscriber)
     if (_directEff[sigId] !== undefined && _directEffFirst[sigId] === effId) {
         _clearDirectEff(sigId);
-        _subFirst[sigId] = -1;
         return;
     }
 
@@ -217,13 +230,7 @@ function _removeSub(sigId: number, effId: number): void {
     for (let i = 0; i < len; i++) {
         if (data[ptr + i] === effId) {
             data[ptr + i] = data[ptr + len - 1];
-            const newLen = len - 1;
-            _subsLen[sigId] = newLen;
-            if (newLen === 0) {
-                _subFirst[sigId] = -1;
-            } else {
-                _subFirst[sigId] = data[ptr];
-            }
+            _subsLen[sigId] = len - 1;
             return;
         }
     }
@@ -237,9 +244,9 @@ function _removeSub(sigId: number, effId: number): void {
 // _effDepsCap[effId] = allocated capacity
 // ═══════════════════════════════════════════════════════════════════════════
 
-let _effDepsPtr: Int32Array = new Int32Array(4096);
-let _effDepsLen: Uint8Array = new Uint8Array(4096);
-let _effDepsCap: Uint8Array = new Uint8Array(4096);
+let _effDepsPtr: Int32Array = new Int32Array(4096).fill(-1);
+let _effDepsLen: Uint16Array = new Uint16Array(4096);
+let _effDepsCap: Uint16Array = new Uint16Array(4096);
 let _effDepsData: Int32Array = new Int32Array(4096);
 let _effDepsTop = 0;
 const DEPS_GROW = 4;
@@ -250,8 +257,8 @@ function _ensureEff(effId: number): void {
     const old = _effDepsPtr.length;
     const newLen = Math.max(effId + 512, old * 2);
     const np = new Int32Array(newLen);
-    const nl = new Uint8Array(newLen);
-    const nc = new Uint8Array(newLen);
+    const nl = new Uint16Array(newLen);
+    const nc = new Uint16Array(newLen);
     np.fill(-1, old);
     np.set(_effDepsPtr);
     nl.set(_effDepsLen);
@@ -313,6 +320,30 @@ function _addDep(effId: number, sigId: number): void {
 
 let _signalTags = new Uint8Array(4096);
 let _tagCap = 4096;
+
+// JS-side value cache for ALL non-number signal values (strings, objects,
+// booleans). The WASM arena string path panicked (memcpyAlias on the first
+// alloc) and leaked on every write, so non-number values never touch WASM.
+let _jsValueCache: unknown[] = new Array(4096);
+
+// Growable JS cache for NUMBER signals with IDs >= ZIG_SIGNAL_CAP. The WASM
+// arena only has 4096 slots; writing _f64[id] past that corrupts adjacent
+// metadata. Numbers must live here instead.
+let _jsNumberCache: Float64Array = new Float64Array(4096);
+
+function _ensureJsNumberCache(id: number): void {
+    if (id < _jsNumberCache.length) return;
+    const newLen = Math.max(id + 512, _jsNumberCache.length * 2);
+    const next = new Float64Array(newLen);
+    next.set(_jsNumberCache.subarray(0, _jsNumberCache.length));
+    _jsNumberCache = next;
+}
+
+function _ensureJsValueCache(id: number): void {
+    if (id < _jsValueCache.length) return;
+    const newLen = Math.max(id + 512, _jsValueCache.length * 2);
+    _jsValueCache.length = newLen;
+}
 
 function _ensureTagCap(id: number): void {
     if (id < _tagCap) return;
@@ -406,9 +437,6 @@ function _ensureEffects(id: number): void {
         ns.set(_batchSeenGen.subarray(0, _batchSeenGen.length));
         _batchSeenGen = ns;
     }
-    if (capped > _dirtyEffBuf.length) {
-        _dirtyEffBuf = new Int32Array(capped);
-    }
 }
 
 function _ensureManualSubSlots(id: number): void {
@@ -430,12 +458,16 @@ function _ensureManualSubFns(needed: number): void {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// GENERATION-BASED TRACKING (v6)
+// GENERATION-BASED TRACKING
 //
 // _trackSignal(signalId):
 //   1. if _lastTrackGen[signalId] === _subGen → ALREADY SUBBED (O(1) fast path)
 //   2. Scan flat subscriber array for effId → if found, update gen, return
 //   3. Not found → _addSub + _addDep, set _lastTrackGen[signalId] = _subGen
+//
+// All subscriptions flow through the JS flat arrays. There is no WASM
+// subscriber path, so the old 255-subscriber silent cap is gone by
+// construction and the direct-effect cache stays consistent with the arrays.
 //
 // _jsClearDeps(effId):
 //   1. Iterate flat dep array, for each dep call _removeSub
@@ -451,20 +483,9 @@ function _trackSignal(signalId: number): void {
 
     _ensureSubs(signalId);
 
-    // Linear scan of flat subscriber array (cache-friendly)
-    const ptr = _subsPtr[signalId];
-    const len = _subsLen[signalId];
-    const data = _subsData;
-    if (ptr >= 0) {
-        for (let i = 0; i < len; i++) {
-            if (data[ptr + i] === effId) {
-                _lastTrackGen[signalId] = _subGen;
-                return;
-            }
-        }
-    }
-
-    // New subscription
+    // No membership scan needed: _runEffect clears the effect's deps before the
+    // body runs, so a first read of a signal in this run is ALWAYS a fresh
+    // subscription. A scan could only ever miss, so it is pure dead work.
     _addSub(signalId, effId);
     _addDep(effId, signalId);
     _lastTrackGen[signalId] = _subGen;
@@ -486,80 +507,139 @@ function _jsClearDeps(effId: number): void {
 // EFFECT EXECUTION
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Run one effect. Deps are re-established from scratch every run so the
+// tracking set is always derived from the last read, never a stale union.
+// try/finally guarantees _activeEffect is reset even when the effect throws,
+// so a throwing effect can never wedge tracking. A throw made DURING effect
+// creation propagates to the caller; a throw during dispatch is contained by
+// the caller's per-effect guard.
 function _runEffect(id: number): void {
     if (_effectDisposed[id]) return;
     _subGen++;
     _jsClearDeps(id);
     _activeEffect = id;
-    _effectFns[id]();
-    _activeEffect = -1;
-}
-
-function _runEffectList(ids: number[], count: number): void {
-    if (count <= 0) return;
-    _batchGen++;
-    const gen = _batchGen;
-    const seen = _batchSeenGen;
-
-    for (let i = 0; i < count; i++) {
-        const eid = ids[i];
-        if (seen[eid] !== gen) {
-            seen[eid] = gen;
-            _runEffect(eid);
-        }
+    try {
+        _effectFns[id]();
+    } finally {
+        _activeEffect = -1;
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// DIRTY PROPAGATION
+// DISPATCH — single JS authority
+//
+// All subscribers live in the JS flat arrays (_subsPtr/_subsLen/_subsData) or
+// the single-subscriber direct-effect cache. WASM is never consulted for
+// subscriber state, so there is no 255-subscriber cap and no cross-tier
+// divergence to reconcile.
+//
+// Per-effect isolation: a throwing effect is logged and skipped; it never
+// aborts the remaining subscribers or wedges tracking (_runEffect resets
+// _activeEffect in finally). Reentrant set() during a dispatch reuses the
+// in-flight batch generation so no effect runs twice for one logical change.
 // ═══════════════════════════════════════════════════════════════════════════
 
-let _dirtyEffBuf = new Int32Array(2048);
+let _dispatchActive = false;
 
-function _syncDirty(): void {
+// Per-depth subscriber snapshots. Dispatch must iterate a stable list: while
+// an effect runs it clears and re-establishes its own subscriptions, which
+// mutates _subsData in place (swap-with-last removal + append). Iterating the
+// live array can overwrite a not-yet-visited subscriber or miss one entirely.
+// Each dispatch depth gets its own reused buffer, so a reentrant set() can
+// never clobber the outer dispatch's snapshot.
+let _scratchDepth = 0;
+let _scratchPool: Int32Array[] = [new Int32Array(64)];
+
+function _dispatchSignal(sigId: number, seen: Uint32Array, gen: number): void {
+    // Single-subscriber fast path — the direct-effect cache.
+    if (sigId < _directEffFirst.length) {
+        const firstEff = _directEffFirst[sigId];
+        if (firstEff >= 0) {
+            if (seen[firstEff] !== gen) {
+                seen[firstEff] = gen;
+                _runEffectGuarded(firstEff);
+            }
+            return;
+        }
+    }
+
+    const ptr = _subsPtr[sigId];
+    const len = _subsLen[sigId];
+    if (ptr < 0 || len === 0) return;
+
+    if (_scratchDepth >= _scratchPool.length) {
+        _scratchPool.push(new Int32Array(64));
+    }
+    let snap = _scratchPool[_scratchDepth];
+    if (snap.length < len) {
+        snap = new Int32Array(len * 2);
+        _scratchPool[_scratchDepth] = snap;
+    }
+    _scratchDepth++;
+    try {
+        for (let i = 0; i < len; i++) snap[i] = _subsData[ptr + i];
+        for (let i = 0; i < len; i++) {
+            const eid = snap[i];
+            if (eid >= 0 && eid < _effectFns.length && seen[eid] !== gen) {
+                seen[eid] = gen;
+                _runEffectGuarded(eid);
+            }
+        }
+    } finally {
+        _scratchDepth--;
+    }
+}
+
+function _runEffectGuarded(id: number): void {
+    try {
+        _runEffect(id);
+    } catch (e) {
+        logError('effect.dispatch-failed', { effectId: id }, e);
+    }
+}
+
+function _dispatchSet(sigId: number): void {
+    if (sigId >= _subsPtr.length) return;
+    if (!_dispatchActive) {
+        _batchGen++;
+        const gen = _batchGen;
+        _dispatchActive = true;
+        try {
+            _dispatchSignal(sigId, _batchSeenGen, gen);
+        } finally {
+    _dispatchActive = false;
+    _scratchDepth = 0;
+        }
+    } else {
+        // Reentrant set during a dispatch — reuse the active generation so the
+        // "seen" table dedups across the whole logical change.
+        _dispatchSignal(sigId, _batchSeenGen, _batchGen);
+    }
+}
+
+function _flushDirty(): void {
+    _batchGen++;
+    const gen = _batchGen;
+    const seen = _batchSeenGen;
+
     const count = _jsDirtyCount;
     if (count === 0) return;
-    const list = _jsDirtyList;
     _jsDirtyCount = 0;
     _jsDirtyBitmap.fill(0, 0, _jsMaxDirtyWord + 1);
     _jsMaxDirtyWord = 0;
 
-    _batchGen++;
-    const gen = _batchGen;
-    const seen = _batchSeenGen;
-    let effCount = 0;
-    const effBuf = _dirtyEffBuf;
-
-    for (let i = 0; i < count; i++) {
-        const sigId = list[i];
-        if (sigId >= _subsPtr.length) continue;
-
-        // Check direct effect first — _subsPtr is -1 for direct-effect signals
-        const dirFn = _directEff[sigId];
-        if (dirFn !== undefined) {
-            const effId = _directEffFirst[sigId];
-            if (effId >= 0 && seen[effId] !== gen) {
-                seen[effId] = gen;
-                effBuf[effCount++] = effId;
-            }
-            continue;
+    // Mark dispatch active so reentrant set() during the flush reuses this
+    // generation and dedups against it (no double-run across the batch).
+    _dispatchActive = true;
+    try {
+        const list = _jsDirtyList;
+        for (let i = 0; i < count; i++) {
+            const sigId = list[i];
+            if (sigId >= _subsPtr.length) continue;
+            _dispatchSignal(sigId, seen, gen);
         }
-
-        const ptr = _subsPtr[sigId];
-        const len = _subsLen[sigId];
-        if (ptr < 0 || len === 0) continue;
-        const data = _subsData;
-        for (let j = 0; j < len; j++) {
-            const effId = data[ptr + j];
-            if (seen[effId] !== gen) {
-                seen[effId] = gen;
-                effBuf[effCount++] = effId;
-            }
-        }
-    }
-
-    for (let i = 0; i < effCount; i++) {
-        _runEffect(effBuf[i]);
+    } finally {
+        _dispatchActive = false;
     }
 }
 
@@ -592,15 +672,23 @@ export const signal = <T>(initialValue: T): Signal<T> => {
     _ensureTagCap(id);
     _signalTags[id] = tag;
 
+    // Non-number values always live in the JS value cache: the WASM arena
+    // string path panicked (memcpyAlias) and leaked on every write. Numbers
+    // below ZIG_SIGNAL_CAP use the WASM f64 arena (id < 4096); numbers above
+    // it must NOT touch WASM — the arena is fixed at INITIAL_CAP and writes
+    // beyond that corrupt adjacent memory.
     if (tag === TAG_NUMBER) {
-        arenaAllocNum(initialValue as number);
-    } else if (tag === TAG_STRING) {
-        arenaAllocStr(initialValue as string);
+        if (id < ZIG_SIGNAL_CAP) {
+            arenaAllocNum(initialValue as number);
+        } else {
+            _ensureJsNumberCache(id);
+            _jsNumberCache[id] = initialValue as number;
+        }
     } else {
-        arenaAllocObj(initialValue);
+        _ensureJsValueCache(id);
+        _jsValueCache[id] = initialValue;
     }
 
-    _core.subs_init(id);
     _ensureSubs(id);
     _subsPtr[id] = -1;
     _ensureManualSubSlots(id);
@@ -610,13 +698,18 @@ export const signal = <T>(initialValue: T): Signal<T> => {
 
     if (tag === TAG_NUMBER) {
         const fid = id;
-        getter = () => _f64[fid] as T;
-        getterTracked = () => { _trackSignal(fid); return _f64[fid] as T; };
+        if (id < ZIG_SIGNAL_CAP) {
+            getter = () => _f64[fid] as T;
+            getterTracked = () => { _trackSignal(fid); return _f64[fid] as T; };
+        } else {
+            // High-ID signal: value lives in JS number cache, not WASM arena
+            getter = () => _jsNumberCache[fid] as T;
+            getterTracked = () => { _trackSignal(fid); return _jsNumberCache[fid] as T; };
+        }
     } else {
         const nid = id;
-        const ntag = tag;
-        getter = () => _readNonNumber(nid, ntag) as T;
-        getterTracked = () => { _trackSignal(nid); return _readNonNumber(nid, ntag) as T; };
+        getter = () => _jsValueCache[nid] as T;
+        getterTracked = () => { _trackSignal(nid); return _jsValueCache[nid] as T; };
     }
 
     const s = (() => {
@@ -629,114 +722,71 @@ export const signal = <T>(initialValue: T): Signal<T> => {
     (s as { _id: number })._id = id;
     s.get = getter;
 
-    // ── BARE METAL SIGNAL SETTER (v8) ──
+    // ── BARE METAL SIGNAL SETTER ──
     //
     // Direct-effect path: for 90% of signals with 1 subscriber,
     //   _directEff[fid]() bypasses subscriber arrays AND effect dispatch.
-    //   Total: 3 array ops + 1 function call (was 7+ ops + 3 calls in v7)
+    //   Total: 3 array ops + 1 function call.
     //
     if (tag === TAG_NUMBER) {
         const fid = id;
-        s.set = (newValue: T) => {
-            const val = newValue as number;
-            const old = _f64[fid];
-            if (old === val) return;
-            _f64[fid] = val;
+        if (id < ZIG_SIGNAL_CAP) {
+            s.set = (newValue: T) => {
+                const val = newValue as number;
+                const old = _f64[fid];
+                if (old === val) return;
+                _f64[fid] = val;
 
-            if (_jsBatchDepth === 0) {
-                // DIRECT EFFECT PATH: run through _runEffect to preserve dep tracking
-                const firstEff = _directEffFirst[fid];
-                if (firstEff >= 0) {
-                    _runEffect(firstEff);
+                if (_jsBatchDepth === 0) {
+                    _dispatchSet(fid);
                 } else {
-                    // Fallback: flat subscriber array
-                    const first = _subFirst[fid];
-                    if (first >= 0) {
-                        const len = _subsLen[fid];
-                        if (len === 1) {
-                            _runEffect(first);
-                        } else if (len === 2) {
-                            // 2-subscriber fast path: no batch gen, no dedup array, just 2 calls
-                            const ptr = _subsPtr[fid];
-                            const data = _subsData;
-                            _runEffect(data[ptr]);
-                            _runEffect(data[ptr + 1]);
-                        } else {
-                            const ptr = _subsPtr[fid];
-                            const data = _subsData;
-                            _batchGen++;
-                            const gen = _batchGen;
-                            const seen = _batchSeenGen;
-                            for (let i = 0; i < len; i++) {
-                                const effId = data[ptr + i];
-                                if (seen[effId] !== gen) {
-                                    seen[effId] = gen;
-                                    _runEffect(effId);
-                                }
-                            }
-                        }
+                    _jsMarkDirty(fid);
+                }
+                markSignalDirty(fid);
+
+                const mLen = _manualSubLens[fid];
+                if (mLen > 0) {
+                    const mOffset = _manualSubOffsets[fid];
+                    for (let i = 0; i < mLen; i++) {
+                        _manualSubFns[mOffset + i]();
                     }
                 }
-            } else {
-                _jsMarkDirty(fid);
-            }
+            };
+        } else {
+            s.set = (newValue: T) => {
+                const val = newValue as number;
+                const old = _jsNumberCache[fid];
+                if (old === val) return;
+                _jsNumberCache[fid] = val;
 
-            const mLen = _manualSubLens[fid];
-            if (mLen > 0) {
-                const mOffset = _manualSubOffsets[fid];
-                for (let i = 0; i < mLen; i++) {
-                    _manualSubFns[mOffset + i]();
+                if (_jsBatchDepth === 0) {
+                    _dispatchSet(fid);
+                } else {
+                    _jsMarkDirty(fid);
                 }
-            }
-        };
+                markSignalDirty(fid);
+
+                const mLen = _manualSubLens[fid];
+                if (mLen > 0) {
+                    const mOffset = _manualSubOffsets[fid];
+                    for (let i = 0; i < mLen; i++) {
+                        _manualSubFns[mOffset + i]();
+                    }
+                }
+            };
+        }
     } else {
         s.set = (newValue: T) => {
-            let changed = false;
-
-            if (tag === TAG_STRING) {
-                changed = arenaWriteStr(id, newValue as string);
-            } else if (tag === TAG_OBJECT) {
-                changed = arenaWriteObj(id, newValue);
-            } else {
-                changed = arenaWriteBool(id, newValue as boolean);
-            }
-
-            if (!changed) return;
+            const old = _jsValueCache[id];
+            if (old === newValue) return;
+            _jsValueCache[id] = newValue;
 
             if (_jsBatchDepth === 0) {
-                const firstEff = _directEffFirst[id];
-                if (firstEff >= 0) {
-                    _runEffect(firstEff);
-                } else {
-                    const first = _subFirst[id];
-                    if (first >= 0) {
-                        const len = _subsLen[id];
-                        if (len === 1) {
-                            _runEffect(first);
-                        } else if (len === 2) {
-                            const ptr = _subsPtr[id];
-                            const data = _subsData;
-                            _runEffect(data[ptr]);
-                            _runEffect(data[ptr + 1]);
-                        } else {
-                            const ptr = _subsPtr[id];
-                            const data = _subsData;
-                            _batchGen++;
-                            const gen = _batchGen;
-                            const seen = _batchSeenGen;
-                            for (let i = 0; i < len; i++) {
-                                const effId = data[ptr + i];
-                                if (seen[effId] !== gen) {
-                                    seen[effId] = gen;
-                                    _runEffect(effId);
-                                }
-                            }
-                        }
-                    }
-                }
+                _dispatchSet(id);
             } else {
                 _jsMarkDirty(id);
             }
+            markSignalDirty(id);
 
             const mLen = _manualSubLens[id];
             if (mLen > 0) {
@@ -799,12 +849,6 @@ export const signal = <T>(initialValue: T): Signal<T> => {
     return s;
 };
 
-function _readNonNumber(id: number, tag: number): unknown {
-    if (tag === TAG_STRING) return arenaReadStr(id);
-    if (tag === TAG_OBJECT) return arenaReadObj(id);
-    return arenaReadBool(id);
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // PUBLIC API
 // ═══════════════════════════════════════════════════════════════════════════
@@ -816,9 +860,6 @@ export interface EffectScope {
 export const effect = (fn: Subscriber): EffectScope => {
     _ensureCore();
 
-    // ═══════════════════════════════════════════════════════════════════
-    // EFFECT: direct subscriber dispatch, zero graph overhead
-    // ═══════════════════════════════════════════════════════════════════
     const id = _jsEffectCounter++;
     _effectCount = Math.max(_effectCount, id + 1);
     _ensureEffects(id);
@@ -835,6 +876,7 @@ export const effect = (fn: Subscriber): EffectScope => {
 
     return {
         dispose() {
+            if (_effectDisposed[id]) return;
             _jsClearDeps(id);
             _effectDisposed[id] = 1;
         },
@@ -843,18 +885,23 @@ export const effect = (fn: Subscriber): EffectScope => {
 
 export const computed = <T>(fn: () => T): (() => T) => {
     const s = signal<T>(undefined as unknown as T);
-    effect(() => { batch(() => { s.set(fn()); }); });
-    return s;
+    const scope = effect(() => { batch(() => { s.set(fn()); }); });
+    const getter = (() => s()) as (() => T);
+    (getter as any).dispose = () => scope.dispose();
+    return getter;
 };
 
 export const batch = (fn: () => void): void => {
     _ensureCore();
     _jsBatchDepth++;
-    fn();
-    _jsBatchDepth--;
+    try {
+        fn();
+    } finally {
+        _jsBatchDepth--;
+    }
 
     if (_jsBatchDepth === 0 && _jsDirtyCount > 0) {
-        _syncDirty();
+        _flushDirty();
     }
 
     if (cmdBufferPending()) {
@@ -865,7 +912,7 @@ export const batch = (fn: () => void): void => {
 export const flushSync = (): void => {
     _ensureCore();
     if (_jsDirtyCount > 0) {
-        _syncDirty();
+        _flushDirty();
     }
     if (cmdBufferPending()) {
         drainCmdBuffer();
@@ -873,12 +920,23 @@ export const flushSync = (): void => {
 };
 
 export const _resetSignals = (): void => {
-    getCore().full_reset();
-    _initialized = false;
-    _ensureCore();
+    try {
+        _core = getCore();
+        _core.full_reset();
+    } catch {
+        // WASM memory corrupted — reinitialize the entire WASM instance
+        const reinit = reinitWasm();
+        if (!reinit) throw new Error('[dominator] Failed to reinitialize WASM after corruption');
+        _core = reinit;
+        reinit.init();
+    }
+    _resetStrWriteOffset();
+    _rebindViews();
+    _initialized = true;
     _effectFns = new Array(4096);
     _effectDisposed = new Uint8Array(4096);
     _effectCount = 0;
+    _jsEffectCounter = 0;
     _activeEffect = -1;
     _manualSubOffsets = new Int32Array(4096);
     _manualSubLens = new Uint8Array(4096);
@@ -896,18 +954,16 @@ export const _resetSignals = (): void => {
     _jsDirtyCount = 0;
     _jsBatchDepth = 0;
     _jsMaxDirtyWord = 0;
-    _dirtyEffBuf = new Int32Array(2048);
-    // Direct-effect storage (v8)
+    _dispatchActive = false;
+    // Direct-effect storage
     _directEff = new Array(2048);
     _directEffFirst = new Int32Array(2048);
     _directEffFirst.fill(-1);
     // Flat subscriber storage
-    _subFirst = new Int32Array(2048);
-    _subFirst.fill(-1);
     _subsPtr = new Int32Array(2048);
     _subsPtr.fill(-1);
-    _subsLen = new Uint8Array(2048);
-    _subsCap = new Uint8Array(2048);
+    _subsLen = new Uint16Array(2048);
+    _subsCap = new Uint16Array(2048);
     _subsData = new Int32Array(4096);
     _subsDataTop = 0;
     _subsDataCap = 4096;
@@ -915,11 +971,13 @@ export const _resetSignals = (): void => {
     // Flat effect dep storage
     _effDepsPtr = new Int32Array(4096);
     _effDepsPtr.fill(-1);
-    _effDepsLen = new Uint8Array(4096);
-    _effDepsCap = new Uint8Array(4096);
+    _effDepsLen = new Uint16Array(4096);
+    _effDepsCap = new Uint16Array(4096);
     _effDepsData = new Int32Array(4096);
     _effDepsTop = 0;
     _effDepsDataCap = 4096;
+    _jsValueCache = new Array(4096);
+    _jsNumberCache = new Float64Array(4096);
     _resetCmdBuffer();
 };
 
@@ -947,8 +1005,13 @@ export function signalArray(count: number, initialValue: number = 0): SignalArra
         const id = _signalCount++;
         _ensureTagCap(id);
         _signalTags[id] = TAG_NUMBER;
-        arenaAllocNum(initialValue);
-        _core.subs_init(id);
+        // Skip WASM calls for signal IDs beyond the fixed WASM array bounds
+        if (id < ZIG_SIGNAL_CAP) {
+            arenaAllocNum(initialValue);
+        } else {
+            _ensureJsNumberCache(id);
+            _jsNumberCache[id] = initialValue;
+        }
         _ensureSubs(id);
         _subsPtr[id] = -1;
         _ensureManualSubSlots(id);
@@ -963,49 +1026,25 @@ export function signalArray(count: number, initialValue: number = 0): SignalArra
             if (_activeEffect >= 0) {
                 _trackSignal(id);
             }
-            return _f64[id];
+            return id < ZIG_SIGNAL_CAP ? _f64[id] : _jsNumberCache[id];
         },
 
         set(i: number, value: number): void {
             const id = baseId + i;
-            const old = _f64[id];
+            const old = id < ZIG_SIGNAL_CAP ? _f64[id] : _jsNumberCache[id];
             if (old === value) return;
-            _f64[id] = value;
+            if (id < ZIG_SIGNAL_CAP) {
+                _f64[id] = value;
+            } else {
+                _jsNumberCache[id] = value;
+            }
 
             if (_jsBatchDepth === 0) {
-                const firstEff = _directEffFirst[id];
-                if (firstEff >= 0) {
-                    _runEffect(firstEff);
-                } else {
-                    const first = _subFirst[id];
-                    if (first >= 0) {
-                        const len = _subsLen[id];
-                        if (len === 1) {
-                            _runEffect(first);
-                        } else if (len === 2) {
-                            const ptr = _subsPtr[id];
-                            const data = _subsData;
-                            _runEffect(data[ptr]);
-                            _runEffect(data[ptr + 1]);
-                        } else {
-                            const ptr = _subsPtr[id];
-                            const data = _subsData;
-                            _batchGen++;
-                            const gen = _batchGen;
-                            const seen = _batchSeenGen;
-                            for (let j = 0; j < len; j++) {
-                                const effId = data[ptr + j];
-                                if (seen[effId] !== gen) {
-                                    seen[effId] = gen;
-                                    _runEffect(effId);
-                                }
-                            }
-                        }
-                    }
-                }
+                _dispatchSet(id);
             } else {
                 _jsMarkDirty(id);
             }
+            markSignalDirty(id);
 
             const mLen = _manualSubLens[id];
             if (mLen > 0) {
@@ -1017,25 +1056,51 @@ export function signalArray(count: number, initialValue: number = 0): SignalArra
         },
 
         getValues(): Float64Array {
-            return _f64.subarray(baseId, baseId + count);
+            if (baseId >= ZIG_SIGNAL_CAP) {
+                return _jsNumberCache.subarray(baseId, baseId + count);
+            }
+            if (baseId + count <= ZIG_SIGNAL_CAP) {
+                return _f64.subarray(baseId, baseId + count);
+            }
+            // Crosses the WASM/JS boundary: build a merged copy.
+            const out = new Float64Array(count);
+            for (let i = 0; i < count; i++) {
+                const id = baseId + i;
+                out[i] = id < ZIG_SIGNAL_CAP ? _f64[id] : _jsNumberCache[id];
+            }
+            return out;
         },
 
         setValues(values: Float32Array | Float64Array | number[]): void {
             const len = values.length < count ? values.length : count;
+            const lowEnd = baseId < ZIG_SIGNAL_CAP ? Math.min(len, ZIG_SIGNAL_CAP - baseId) : 0;
 
             _jsBatchDepth++;
-            for (let i = 0; i < len; i++) {
-                const id = baseId + i;
-                const val = values[i];
-                if (_f64[id] !== val) {
-                    _f64[id] = val;
-                    _jsMarkDirty(id);
+            try {
+                for (let i = 0; i < lowEnd; i++) {
+                    const id = baseId + i;
+                    const val = values[i];
+                    if (_f64[id] !== val) {
+                        _f64[id] = val;
+                        _jsMarkDirty(id);
+                        markSignalDirty(id);
+                    }
                 }
+                for (let i = lowEnd; i < len; i++) {
+                    const id = baseId + i;
+                    const val = values[i];
+                    if (_jsNumberCache[id] !== val) {
+                        _jsNumberCache[id] = val;
+                        _jsMarkDirty(id);
+                        markSignalDirty(id);
+                    }
+                }
+            } finally {
+                _jsBatchDepth--;
             }
-            _jsBatchDepth--;
 
-            if (_jsDirtyCount > 0) {
-                _syncDirty();
+            if (_jsBatchDepth === 0 && _jsDirtyCount > 0) {
+                _flushDirty();
             }
         },
     };

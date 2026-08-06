@@ -161,6 +161,13 @@ export function recordFrame(stats: FrameStats, drawCalls: number = 0): FrameReco
     const frameTime = stats.totalFrameTime;
 
     // Write to ring buffer — single indexed writes, zero allocation
+    // Subtract old value from running sums when ring buffer overwrites
+    if (p._count >= p.config.maxHistory) {
+        p._sumFrameTime -= p._frameTimes[idx];
+        p._sumDrawCalls -= p._drawCalls[idx];
+        p._sumMemory -= p._memoryUsed[idx];
+    }
+
     p._frameTimes[idx] = frameTime;
     p._drawCalls[idx] = drawCalls;
     p._memoryUsed[idx] = stats.memoryUsed;

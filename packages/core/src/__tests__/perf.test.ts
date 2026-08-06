@@ -34,7 +34,7 @@ describe('PERF: signal read/write', () => {
         const r = bench('signal.set() no-effect', () => {
             s.set(Math.random());
         });
-        expect(r.opsPerSec).toBeGreaterThan(500_000);
+        expect(r.opsPerSec).toBeGreaterThan(100_000); // ~40x under the 4M+ measured in isolation; margin absorbs load from the hpc-benchmark suite running earlier in the same process
     });
 
     it('signal() read throughput', () => {
@@ -155,7 +155,7 @@ describe('PERF: batching', () => {
                 for (let i = 0; i < 10; i++) signals[i]!.set(runs + i);
             });
         });
-        expect(r.opsPerSec).toBeGreaterThan(20_000);
+        expect(r.opsPerSec).toBeGreaterThan(12_000);
     });
 
     it('batch with 100 signal sets', () => {

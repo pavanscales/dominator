@@ -5,7 +5,7 @@
  *   Rect, Text, Border, Shadow, Transform, Clip
  *
  * The render graph processes ONLY dirty+NEEDS_PAINT entities.
- * Command buffer is a fixed ring buffer — reset just moves the head pointer.
+ * Command buffer is a pre-allocated linear buffer — reset moves the head pointer.
  * String interning uses a persistent table with generation-based eviction.
  *
  * ZERO-ALLOCATION GUARANTEES:
@@ -101,7 +101,7 @@ const _gpuCmdBuf = new Float32Array(GPU_CMD_BUF_FLOATS);
 let _gpuCmdHead = 0;
 
 function _emitGPUVertex(px: number, py: number, r: number, g: number, b: number, a: number): void {
-    // Convert pixel-space → NDC inline (zero CPU translation at render time)
+    if (_gpuCmdHead + 6 > GPU_CMD_BUF_FLOATS) { _degraded = true; return; }
     const nx = (px / _canvasWidth) * 2 - 1;
     const ny = 1 - (py / _canvasHeight) * 2;
     const w = _gpuCmdHead;
@@ -162,29 +162,72 @@ function _intern(str: string): number {
         }
     }
 
-    // Evict unused if full
+    // Evict unused if full — also clear hash table entries
     if (_strTableLen >= MAX_STRINGS) {
         for (let i = 0; i < _strTableLen; i++) {
             if (_strLastUsed[i] < _strGen - 2) {
+                const evictedStr = _strTable[i];
                 _strTable[i] = '';
+                // Clear the hash entry for the evicted string using its own hash
+                const evictedProbe = _hashStr(evictedStr) % _strHashCap;
+                for (let j = 0; j < 16; j++) {
+                    const slot = (evictedProbe + j) % _strHashCap;
+                    if (_strHashVals[slot] === i) {
+                        _strHashVals[slot] = -1;
+                        break;
+                    }
+                }
             }
         }
     }
 
-    // Insert new
-    const id = _strTableLen < MAX_STRINGS ? _strTableLen++ : 0;
+// Reuse a slot freed by eviction, or append while under the cap.
+    let id = -1;
+    for (let i = 0; i < _strTableLen; i++) {
+        if (_strTable[i] === '') { id = i; break; }
+    }
+    if (id === -1 && _strTableLen < MAX_STRINGS) {
+        id = _strTableLen++;
+    }
+    if (id === -1) {
+        // Table is genuinely full of live strings. Evict the least-recently-used
+        // one on purpose. Never clobber a slot blindly: a pending command still
+        // references the old occupant, so overwriting it would silently alias
+        // that string and tear the render output.
+        id = 0;
+        let oldest = _strLastUsed[0];
+        for (let i = 1; i < _strTableLen; i++) {
+            if (_strLastUsed[i] < oldest) {
+                oldest = _strLastUsed[i];
+                id = i;
+            }
+        }
+        const evictedStr = _strTable[id];
+        const evictedProbe = _hashStr(evictedStr) % _strHashCap;
+        for (let j = 0; j < 16; j++) {
+            const slot = (evictedProbe + j) % _strHashCap;
+            if (_strHashVals[slot] === id) { _strHashVals[slot] = -1; break; }
+        }
+        _strTable[id] = '';
+        _degraded = true;
+    }
+
     _strTable[id] = str;
     _strLastUsed[id] = _strGen;
 
+    // Always insert into hash table — find any available slot
     for (let i = 0; i < 16; i++) {
         const slot = (probe + i) % _strHashCap;
         if (_strHashVals[slot] === -1 || _strHashKeys[slot] === hash) {
             _strHashKeys[slot] = hash;
             _strHashVals[slot] = id;
-            break;
+            return id;
         }
     }
-
+    // All 16 probes occupied — insert at the starting probe slot (best-effort)
+    const fallbackSlot = probe % _strHashCap;
+    _strHashKeys[fallbackSlot] = hash;
+    _strHashVals[fallbackSlot] = id;
     return id;
 }
 
@@ -193,6 +236,7 @@ function _intern(str: string): number {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function _emit4(type: CmdType, a: number, b: number, c: number, d: number): void {
+    if (_cmdHead + 5 > CMD_BUF_SIZE) { _degraded = true; return; }
     const w = _cmdHead;
     _cmdBuf[w] = type;
     _cmdBuf[w + 1] = a;
@@ -203,6 +247,7 @@ function _emit4(type: CmdType, a: number, b: number, c: number, d: number): void
 }
 
 function _emit8(type: CmdType, a: number, b: number, c: number, d: number, e: number, f: number, g: number): void {
+    if (_cmdHead + 8 > CMD_BUF_SIZE) { _degraded = true; return; }
     const w = _cmdHead;
     _cmdBuf[w] = type;
     _cmdBuf[w + 1] = a;
@@ -228,26 +273,32 @@ export interface RenderGraph {
 
 let _rg: RenderGraph = { commandCount: 0, cullCount: 0, mergeCount: 0, batchCount: 0 };
 
+// True when a command/string buffer exhausted its capacity last frame. Internal
+// drops are then reported instead of silently tearing the render output.
+let _degraded = false;
+
+export function isRenderGraphDegraded(): boolean {
+    return _degraded;
+}
+
 export function buildRenderGraph(degrade: number = 0): RenderGraph {
     const w = getWorld();
     _rg = { commandCount: 0, cullCount: 0, mergeCount: 0, batchCount: 0 };
+    _degraded = false;
+
+    // REUSE: replay previous frame's frozen command buffer
+    if (degrade & 4) {
+        if (_frozenCommandCount > 0) {
+            _rg.commandCount = _frozenCommandCount;
+            return _rg;
+        }
+    }
+
     _cmdHead = 0;
     _cmdTail = 0;
     _floatHead = 0;
     _gpuCmdHead = 0;
     _strGen++;
-
-    // REUSE: replay previous frame's frozen command buffer
-    if (degrade & 4) {
-        if (_frozenCommandCount > 0) {
-            _cmdHead = _frozenHead;
-            _cmdTail = _frozenTail;
-            _gpuCmdHead = _frozenGPUHead;
-            _rg.commandCount = _frozenCommandCount;
-            return _rg;
-        }
-        // Fall through to normal build if no frozen commands exist
-    }
 
     // Process ONLY dirty+NEEDS_PAINT entities — O(dirty) not O(total)
     const dirtyList = _getDirtyList();
@@ -300,6 +351,9 @@ const opacityPacked = (opacity * 1000) | 0;
     const bgB = (bgRgba >> 8) & 0xFF;
     const bgA = bgRgba & 0xFF;
 
+    // Check if there's room for the full 10-word RECT command before writing
+    if (_cmdHead + 10 > CMD_BUF_SIZE) { _degraded = true; return; }
+
     _emit8(
         CmdType.RECT,
         entityId,
@@ -310,10 +364,12 @@ const opacityPacked = (opacity * 1000) | 0;
         bgRgba,
         ((borderRadius * 10) << 16) | ((borderWidth * 10) & 0xFFFF),
     );
-    const w2 = _cmdHead;
-    _cmdBuf[w2] = borderRgba;
-    _cmdBuf[w2 + 1] = opacityPacked;
-    _cmdHead = w2 + 2;
+    {
+        const w2 = _cmdHead;
+        _cmdBuf[w2] = borderRgba;
+        _cmdBuf[w2 + 1] = opacityPacked;
+        _cmdHead = w2 + 2;
+    }
 
 _rg.commandCount++;
 
@@ -386,8 +442,15 @@ export function optimizeCommands(degrade: number = 0): void {
 }
 
 function _cmdSize(type: number): number {
-    const sizes = [1, 10, 4, 4, 5, 5, 4, 1, 1];
+    const sizes = [1, 10, 4, 5, 5, 5, 4, 1, 1];
     return sizes[type] || 1;
+}
+
+// Public accessor so renderers can skip unknown/unhandled command types by
+// their real width instead of guessing 1 word (which desynchronizes the
+// read pointer from the write pointer and corrupts the whole frame).
+export function getCmdSize(type: number): number {
+    return _cmdSize(type);
 }
 
 // ── PASS 1: CULL — remove NOPs ──────────────────────────────────────────

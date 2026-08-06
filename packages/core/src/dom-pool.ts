@@ -34,7 +34,6 @@ export class DomPool {
         this._className = className ?? null;
 
         // Pre-allocate all elements — single pass
-        const frag = document.createDocumentFragment();
         for (let i = 0; i < cap; i++) {
             const el = document.createElement(tag);
             if (className) el.className = className;
@@ -66,9 +65,9 @@ export class DomPool {
             el.textContent = '';
             // Clear data attributes (common in particle systems)
             // @ts-ignore — direct dataset access
-            el.dataset.r = undefined;
+            delete el.dataset.r;
             // @ts-ignore
-            el.dataset.c = undefined;
+            delete el.dataset.c;
 
             this._buf[this._head] = el;
             this._head = (this._head + 1) & this._mask;

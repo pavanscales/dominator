@@ -1,17 +1,30 @@
 import { signal, Signal } from './signal';
+import { removeAllEventListeners } from './events';
 
 export const path: Signal<string> = signal(
     typeof window !== 'undefined' ? window.location.pathname : '/'
 );
 
+let _popstateHandler: (() => void) | null = null;
+
 if (typeof window !== 'undefined') {
-    window.addEventListener('popstate', () => {
+    _popstateHandler = () => {
         path.set(window.location.pathname);
-    });
+    };
+    window.addEventListener('popstate', _popstateHandler);
+}
+
+export function teardownRouter(): void {
+    if (typeof window !== 'undefined' && _popstateHandler) {
+        window.removeEventListener('popstate', _popstateHandler);
+        _popstateHandler = null;
+    }
 }
 
 export const navigate = (to: string): void => {
-    window.history.pushState({}, '', to);
+    if (typeof window !== 'undefined') {
+        window.history.pushState({}, '', to);
+    }
     path.set(to);
 };
 
@@ -77,7 +90,7 @@ function _splitSegments(path: string): string[] {
     return segments;
 }
 
-export const createRouter = (routes: Route[]): HTMLElement => {
+export const createRouter = (routes: Route[]): { element: HTMLElement; destroy: () => void } => {
     const root = document.createElement('div');
     root.className = 'dominator-router';
 
@@ -90,24 +103,33 @@ export const createRouter = (routes: Route[]): HTMLElement => {
         return _matchTrie(trie, pathname) || wildcardRoute;
     };
 
-    path.subscribe(() => {
+    const renderRoute = () => {
         const route = resolve(path.get());
         if (route) {
             const nextElement = route.component();
             if (currentElement) {
+                removeAllEventListeners(currentElement);
                 root.replaceChild(nextElement, currentElement);
             } else {
                 root.appendChild(nextElement);
             }
             currentElement = nextElement;
         }
-    });
+    };
 
-    const initialRoute = resolve(path.get());
-    if (initialRoute) {
-        currentElement = initialRoute.component();
-        root.appendChild(currentElement);
-    }
+    renderRoute();
 
-    return root;
+    const unsub = path.subscribe(renderRoute);
+
+    return {
+        element: root,
+        destroy: () => {
+            unsub();
+            if (currentElement) {
+                removeAllEventListeners(currentElement);
+                root.removeChild(currentElement);
+                currentElement = null;
+            }
+        },
+    };
 };

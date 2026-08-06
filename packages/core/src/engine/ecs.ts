@@ -142,6 +142,7 @@ export interface ECSWorld {
 }
 
 let _world: ECSWorld | null = null;
+let _sharedBuffer: SharedArrayBuffer | null = null;
 
 const INITIAL_CAP = 4096;
 const GROW_FACTOR = 2;
@@ -211,6 +212,14 @@ function _growArrays(world: ECSWorld): void {
         return n;
     };
     world.event.data = growEvent(world.event.data);
+
+    // Grow freeList — without this, despawn after grow overflows the buffer
+    const growFreeList = (old: Int32Array): Int32Array => {
+        const n = new Int32Array(newCap);
+        n.set(old);
+        return n;
+    };
+    world.freeList = growFreeList(world.freeList);
 
     world.cap = newCap;
     world.generation = growU32(world.generation);
@@ -378,8 +387,6 @@ export function createSharedWorld(maxCapacity: number = 16384): ECSWorld {
     return w;
 }
 
-let _sharedBuffer: SharedArrayBuffer | null = null;
-
 export function getWorldSharedBuffer(): SharedArrayBuffer | null {
     return _sharedBuffer;
 }
@@ -391,6 +398,26 @@ export function createWorldView(sb: SharedArrayBuffer, cap: number): ECSWorld {
         _sbOffset += bytes;
         return o;
     };
+
+    const totalBytes =
+        cap * 4 +   // parent
+        cap * 4 +   // children
+        cap * 4 +   // nextSibling
+        cap * 2 +   // childCount
+        cap * 2 +   // depth
+        cap * 4 +   // flags
+        cap * 4 +   // domRef
+        cap * STYLE_FLOATS * 4 +  // style.floats
+        cap * COLOR_UINT32S * 4 + // style.colors
+        cap * LAYOUT_FLOATS * 4 + // layout.data
+        cap * RENDER_INTS * 4 +   // render.data
+        cap * EVENT_INTS * 4 +    // event.data
+        cap * 4 +   // freeList
+        cap * 4;    // generation
+
+    if (sb.byteLength < totalBytes) {
+        throw new Error(`createWorldView: SharedArrayBuffer too small (${sb.byteLength} < ${totalBytes})`);
+    }
 
     return {
         parent: new Int32Array(sb, off(cap * 4), cap),
@@ -434,14 +461,19 @@ export function spawn(parentId: number = -1): number {
     if (id < 0) return -1;
 
     w.parent[id] = parentId;
-    w.flags[id] = Flag.VISIBLE | Flag.NEEDS_LAYOUT | Flag.NEEDS_PAINT;
+    w.flags[id] = Flag.VISIBLE | Flag.NEEDS_LAYOUT | Flag.NEEDS_PAINT | Flag.DIRTY;
+    // Default opacity 1 — the render graph culls entities at opacity <= 0,
+    // and typed arrays zero-fill by default (0 would hide every entity).
+    w.style.floats[id * STYLE_FLOATS + STYLE_OPACITY] = 1;
     w.generation[id]++;
+    _addToDirtyList(w, id);
 
     if (parentId >= 0) {
         w.nextSibling[id] = w.children[parentId];
         w.children[parentId] = id;
         w.childCount[parentId]++;
         w.depth[id] = w.depth[parentId] + 1;
+        _markLayoutDirtyEntity(w, parentId);
     } else {
         w.depth[id] = 0;
     }
@@ -452,6 +484,7 @@ export function spawn(parentId: number = -1): number {
 export function despawn(id: number): void {
     const w = getWorld();
     if (id <= 0 || id >= w.count) return;
+    if (w.flags[id] & Flag.REMOVED) return;
 
     // Detach from parent
     const pid = w.parent[id];
@@ -467,6 +500,7 @@ export function despawn(id: number): void {
                     w.nextSibling[prev] = w.nextSibling[id];
                 }
                 w.childCount[pid]--;
+                _markLayoutDirtyEntity(w, pid);
                 break;
             }
             prev = child;
@@ -474,12 +508,32 @@ export function despawn(id: number): void {
         }
     }
 
-    // Recursively despawn children
+    // Iteratively despawn all descendants using a pre-allocated stack
+    _despawnStackTop = 0;
     let child = w.children[id];
     while (child >= 0) {
-        const next = w.nextSibling[child];
-        despawn(child);
-        child = next;
+        if (_despawnStackTop < 16384) {
+            _despawnStack[_despawnStackTop++] = child;
+        }
+        child = w.nextSibling[child];
+    }
+    while (_despawnStackTop > 0) {
+        const current = _despawnStack[--_despawnStackTop];
+        // Push this entity's children onto the stack
+        let ch = w.children[current];
+        while (ch >= 0) {
+            if (_despawnStackTop < 16384) {
+                _despawnStack[_despawnStackTop++] = ch;
+            }
+            ch = w.nextSibling[ch];
+        }
+        // Despawn the entity itself (leaf first)
+        w.flags[current] = Flag.REMOVED;
+        w.parent[current] = -1;
+        w.children[current] = -1;
+        w.nextSibling[current] = -1;
+        w.childCount[current] = 0;
+        w.freeList[w.freeCount++] = current;
     }
 
     // Mark as removed
@@ -496,6 +550,7 @@ export function despawn(id: number): void {
 export function setParent(childId: number, newParentId: number): void {
     const w = getWorld();
     if (childId <= 0 || childId >= w.count) return;
+    if (newParentId >= w.count || newParentId === childId) return;
 
     // Detach from old parent
     const oldParent = w.parent[childId];
@@ -532,12 +587,22 @@ export function setParent(childId: number, newParentId: number): void {
     _updateSubtreeDepth(w, childId);
 }
 
+const _depthUpdateStack = new Int32Array(16384);
+let _depthUpdateTop = 0;
+
 function _updateSubtreeDepth(w: ECSWorld, id: number): void {
-    let child = w.children[id];
-    while (child >= 0) {
-        w.depth[child] = w.depth[id] + 1;
-        _updateSubtreeDepth(w, child);
-        child = w.nextSibling[child];
+    _depthUpdateTop = 0;
+    _depthUpdateStack[_depthUpdateTop++] = id;
+    while (_depthUpdateTop > 0) {
+        const current = _depthUpdateStack[--_depthUpdateTop];
+        let child = w.children[current];
+        while (child >= 0) {
+            w.depth[child] = w.depth[current] + 1;
+            if (_depthUpdateTop < 16384) {
+                _depthUpdateStack[_depthUpdateTop++] = child;
+            }
+            child = w.nextSibling[child];
+        }
     }
 }
 
@@ -554,7 +619,7 @@ let _dirtyList = new Int32Array(16384);
 let _dirtyCount = 0;
 let _dirtyListCap = 16384;
 
-function _ensureDirtyList(id: number): void {
+function _ensureDirtyList(): void {
     if (_dirtyCount < _dirtyListCap) return;
     const newCap = _dirtyListCap * 2;
     const nd = new Int32Array(newCap);
@@ -564,10 +629,13 @@ function _ensureDirtyList(id: number): void {
 }
 
 function _addToDirtyList(w: ECSWorld, id: number): void {
-    _ensureDirtyList(id);
+    _ensureDirtyList();
     _dirtyList[_dirtyCount++] = id;
 }
 
+// NOTE: Returns a view (subarray) into the internal dirty list buffer.
+// The view becomes stale after clearDirtyFlags() resets _dirtyCount —
+// do not hold the reference across frames or across clearDirtyFlags calls.
 export function _getDirtyList(): Int32Array {
     return _dirtyList.subarray(0, _dirtyCount);
 }
@@ -602,18 +670,29 @@ export const STYLE_BORDER_WIDTH = 14;
 
 export function setStyleFloat(entityId: number, offset: number, value: number): void {
     const w = getWorld();
+    // Bounds guard: entityId beyond the world's allocated range indexes past
+    // the SoA arrays (style.floats is cap*16) and silently corrupts adjacent
+    // memory. Reject invalid IDs and out-of-range style slots up front.
+    if (entityId < 0 || entityId >= w.count) return;
+    if (offset < 0 || offset >= STYLE_FLOATS) return;
     w.style.floats[entityId * STYLE_FLOATS + offset] = value;
     const wasDirty = w.flags[entityId] & Flag.DIRTY;
-    w.flags[entityId] |= Flag.HAS_STYLE | Flag.DIRTY | Flag.NEEDS_LAYOUT;
+    w.flags[entityId] |= Flag.HAS_STYLE | Flag.DIRTY | Flag.NEEDS_LAYOUT | Flag.NEEDS_PAINT;
     if (!wasDirty) _addToDirtyList(w, entityId);
+    _markLayoutDirtyEntity(w, entityId);
 }
 
 export function getStyleFloat(entityId: number, offset: number): number {
-    return getWorld().style.floats[entityId * STYLE_FLOATS + offset];
+    const w = getWorld();
+    if (entityId < 0 || entityId >= w.count) return 0;
+    if (offset < 0 || offset >= STYLE_FLOATS) return 0;
+    return w.style.floats[entityId * STYLE_FLOATS + offset];
 }
 
 export function setStyleColor(entityId: number, slot: number, r: number, g: number, b: number, a: number): void {
     const w = getWorld();
+    if (entityId < 0 || entityId >= w.count) return;
+    if (slot < 0 || slot >= COLOR_UINT32S) return;
     const packed = ((r & 0xFF) << 24) | ((g & 0xFF) << 16) | ((b & 0xFF) << 8) | (a & 0xFF);
     w.style.colors[entityId * COLOR_UINT32S + slot] = packed >>> 0;
     const wasDirty = w.flags[entityId] & Flag.DIRTY;
@@ -622,7 +701,10 @@ export function setStyleColor(entityId: number, slot: number, r: number, g: numb
 }
 
 export function getStyleColor(entityId: number, slot: number): number {
-    return getWorld().style.colors[entityId * COLOR_UINT32S + slot];
+    const w = getWorld();
+    if (entityId < 0 || entityId >= w.count) return 0;
+    if (slot < 0 || slot >= COLOR_UINT32S) return 0;
+    return w.style.colors[entityId * COLOR_UINT32S + slot];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -639,8 +721,10 @@ export const LAYOUT_SW = 6;
 export const LAYOUT_SH = 7;
 
 export function setLayoutRect(entityId: number, x: number, y: number, w: number, h: number): void {
-    const base = entityId * LAYOUT_FLOATS;
     const data = getWorld().layout.data;
+    const wld = getWorld();
+    if (entityId < 0 || entityId >= wld.count) return;
+    const base = entityId * LAYOUT_FLOATS;
     data[base] = x;
     data[base + 1] = y;
     data[base + 2] = w;
@@ -648,20 +732,20 @@ export function setLayoutRect(entityId: number, x: number, y: number, w: number,
 }
 
 export function getLayoutRect(entityId: number): { x: number; y: number; w: number; h: number } {
-    const base = entityId * LAYOUT_FLOATS;
     const data = getWorld().layout.data;
+    const wld = getWorld();
+    if (entityId < 0 || entityId >= wld.count) return { x: 0, y: 0, w: 0, h: 0 };
+    const base = entityId * LAYOUT_FLOATS;
     return { x: data[base], y: data[base + 1], w: data[base + 2], h: data[base + 3] };
 }
 
-export function markLayoutDirty(entityId: number): void {
-    const w = getWorld();
+function _markLayoutDirtyEntity(w: ECSWorld, entityId: number): void {
     const wasDirty = w.flags[entityId] & Flag.DIRTY;
     w.flags[entityId] |= Flag.NEEDS_LAYOUT | Flag.DIRTY;
     if (!wasDirty) _addToDirtyList(w, entityId);
-    // Propagate dirty up to parent
+    // Propagate dirty up to root so runLayout's root gate opens
     let pid = w.parent[entityId];
     while (pid >= 0) {
-        if (w.flags[pid] & Flag.NEEDS_LAYOUT) break;
         const parentWasDirty = w.flags[pid] & Flag.DIRTY;
         w.flags[pid] |= Flag.NEEDS_LAYOUT | Flag.DIRTY;
         if (!parentWasDirty) _addToDirtyList(w, pid);
@@ -669,8 +753,15 @@ export function markLayoutDirty(entityId: number): void {
     }
 }
 
+export function markLayoutDirty(entityId: number): void {
+    const w = getWorld();
+    if (entityId < 0 || entityId >= w.count) return;
+    _markLayoutDirtyEntity(w, entityId);
+}
+
 export function markPaintDirty(entityId: number): void {
     const w = getWorld();
+    if (entityId < 0 || entityId >= w.count) return;
     const wasDirty = w.flags[entityId] & Flag.DIRTY;
     w.flags[entityId] |= Flag.NEEDS_PAINT | Flag.DIRTY;
     if (!wasDirty) _addToDirtyList(w, entityId);
@@ -683,6 +774,10 @@ export function markPaintDirty(entityId: number): void {
 // Pre-allocated stack for DFS traversal — typed array, zero GC
 const _dfsStack = new Int32Array(16384);
 let _dfsStackTop = 0;
+
+// Pre-allocated stack for despawn traversal — zero GC
+const _despawnStack = new Int32Array(16384);
+let _despawnStackTop = 0;
 
 export function forEachChild(parentId: number, fn: (entityId: number) => void): void {
     const w = getWorld();
@@ -738,7 +833,9 @@ export function forEachDescendant(entityId: number, fn: (id: number, depth: numb
 // ═══════════════════════════════════════════════════════════════════════════
 
 export function getDirtyEntities(): Int32Array {
-    return _dirtyList.subarray(0, _dirtyCount);
+    // Return a copy: the caller owns it, so mutating it cannot corrupt the
+    // internal dirty list (a live view would be a footgun for public API).
+    return _dirtyList.slice(0, _dirtyCount);
 }
 
 export function getDirtyEntityCount(): number {

@@ -95,6 +95,14 @@ export function initReactiveBridge(config: ReactiveBridgeConfig): Promise<void> 
                 resolve();
             }
         };
+        _worker.onerror = (err) => {
+            console.error('[dominator] Reactive bridge worker error:', err);
+            _active = false;
+        };
+        _worker.onmessageerror = () => {
+            console.error('[dominator] Reactive bridge worker message error');
+            _active = false;
+        };
     });
 }
 
@@ -123,6 +131,10 @@ export function readSignalF64(signalId: number): number {
 function _pushCmd(cmd: number, ...args: number[]): void {
     if (!_shared) return;
     const wh = _cmdWriteHead;
+    const rh = Atomics.load(_header!, HEADER_CMD_RHEAD);
+    const needed = 1 + args.length;
+    const available = CMD_QUEUE_SIZE - ((wh - rh) & CMD_QUEUE_MASK);
+    if (needed > available) return; // Queue full, drop command
     let w = wh;
     _shared[CMD_QUEUE_OFFSET + (w & CMD_QUEUE_MASK)] = cmd;
     w++;
@@ -184,17 +196,19 @@ export function bridgeBatchEnd(): void {
 // ── Zero-latency listener: Atomics.waitAsync wakes on notify ──────────
 
 async function _startListening(): Promise<void> {
-    while (_active && !_waiting) {
-        _waiting = true;
+    if (_waiting) return;
+    _waiting = true;
 
+    while (_active) {
         // Wait for worker to notify us (effects pending or shutdown)
-        // Atomics.waitAsync returns a promise that resolves when
-        // Atomics.notify is called on the same location
-        const asyncResult = Atomics.waitAsync(_header!, HEADER_CMD, STATUS_READY);
+        Atomics.waitAsync(_header!, HEADER_CMD, STATUS_READY);
 
-        // Also check for effects_pending status
+        // Process any pending effects
         await _waitForEffects();
+        if (!_active) break;
     }
+
+    _waiting = false;
 }
 
 async function _waitForEffects(): Promise<void> {
@@ -209,10 +223,12 @@ async function _waitForEffects(): Promise<void> {
                 const fn = _effectFns[effId];
                 if (fn) fn();
             }
-            // Tell worker we consumed them
-            Atomics.store(_header!, HEADER_PENDING_COUNT, 0);
-            Atomics.store(_header!, HEADER_CMD, STATUS_READY);
-            Atomics.notify(_header!, 0);
+            // Atomically decrement only the count we consumed
+            const prev = Atomics.sub(_header!, HEADER_PENDING_COUNT, count);
+            if (prev === count) {
+                Atomics.store(_header!, HEADER_CMD, STATUS_READY);
+                Atomics.notify(_header!, 0);
+            }
             return;
         }
 

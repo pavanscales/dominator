@@ -21,6 +21,10 @@ const BITMAP_SIZE: u32 = 65536;
 const BITMAP_WORDS: u32 = BITMAP_SIZE / 32;
 const MAX_SUBS_PER_SIGNAL: u32 = 255;
 
+// Snapshot buffer holds all subscriber effect IDs accumulated in one flush.
+// Sized for batches that dirty thousands of signals with overlapping subs.
+const SNAPSHOT_CAP: u32 = 65536;
+
 // ── Memory Layout (all u32 word indices into heap[]) ─────────────────────────
 
 const NUM_WORDS: u32 = 2 * INITIAL_CAP;
@@ -37,7 +41,7 @@ const EFF_RUNNING_START: u32 = EFF_GEN_START + INITIAL_CAP;
 const EFF_DISPOSED_START: u32 = EFF_RUNNING_START + INITIAL_CAP;
 const DIRTY_BITMAP_START: u32 = EFF_DISPOSED_START + INITIAL_CAP;
 const SNAPSHOT_BUF_START: u32 = DIRTY_BITMAP_START + BITMAP_WORDS;
-const DYNAMIC_START: u32 = SNAPSHOT_BUF_START + 512;
+const DYNAMIC_START: u32 = SNAPSHOT_BUF_START + SNAPSHOT_CAP;
 const WAVEFRONT_BASE: u32 = DYNAMIC_START + 262144;
 
 const TAG_NUMBER: u32 = 0;
@@ -474,11 +478,12 @@ fn addEffectDep(effect_id: u32, signal_id: u32) void {
 // SIGNAL REACTIVITY
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export fn signal_track(signal_id: u32) void {
+export fn signal_track(signal_id: u32) u32 {
     if (_active_effect >= 0) {
         subs_add(signal_id, @as(u32, @intCast(_active_effect)));
         addEffectDep(@as(u32, @intCast(_active_effect)), signal_id);
     }
+    return @as(u32, ru8(SUB_LENGTH_START + signal_id));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -541,54 +546,32 @@ export fn signal_flush_immediate(id: u32) u32 {
 export fn signal_flush_dirty() u32 {
     _flush_gen += 1;
 
-    // Double-buffer swap: zero-copy flip instead of bulk copy
-    const current_buf = _dirty_buf;
-    const current_count = _dirty_count;
-    _dirty_count = 0;
-
-    // Swap buffers
-    _dirty_buf = if (_dirty_buf == &_dirty_buf_a) &_dirty_buf_b else &_dirty_buf_a;
-
-    // BARE METAL: Bulk clear bitmap with @memset (SIMD-accelerated)
-    @memset(heap[DIRTY_BITMAP_START..][0..BITMAP_WORDS], 0);
-
-    // BARE METAL: Snapshot subscribers — accumulate into snapshot buffer
-    // Unrolled 4x loop for better ILP (instruction-level parallelism)
+    // Source of truth is the dirty BITMAP, not the bounded static dirty list.
+    // CTZ-scan the bitmap so batches with >1024 dirty signals flush correctly.
     var eff_idx: u32 = 0;
-    var i: u32 = 0;
-
-    // 4x unrolled main loop — processes 4 dirty signals per iteration
-    const unrolled_end = current_count -| 3;
-    while (i < unrolled_end) : (i += 4) {
-        inline for (0..4) |lane| {
-            const sid = current_buf[i + lane];
+    var word_idx: u32 = 0;
+    while (word_idx < BITMAP_WORDS and eff_idx < SNAPSHOT_CAP) : (word_idx += 1) {
+        var w = ru32(DIRTY_BITMAP_START + word_idx);
+        while (w != 0) {
+            const bit: u32 = @ctz(w);
+            const sid = word_idx * 32 + bit;
             const sub_len = @as(u32, ru8(SUB_LENGTH_START + sid));
             if (sub_len > 0) {
                 const sub_offset = ru32(SUB_OFFSET_START + sid);
                 const src_base = DYNAMIC_START + sub_offset;
                 const dst_base = SNAPSHOT_BUF_START + eff_idx;
-                const copy_len = @min(sub_len, 512 - eff_idx);
+                const copy_len = @min(sub_len, SNAPSHOT_CAP - eff_idx);
                 @memcpy(heap[dst_base..][0..copy_len], heap[src_base..][0..copy_len]);
                 eff_idx += copy_len;
+                if (eff_idx >= SNAPSHOT_CAP) break;
             }
+            w &= w - 1;
         }
-        if (eff_idx >= 512) break;
     }
 
-    // Handle remaining 0-3 signals
-    while (i < current_count) : (i += 1) {
-        const sid = current_buf[i];
-        const sub_len = @as(u32, ru8(SUB_LENGTH_START + sid));
-        if (sub_len > 0) {
-            const sub_offset = ru32(SUB_OFFSET_START + sid);
-            const src_base = DYNAMIC_START + sub_offset;
-            const dst_base = SNAPSHOT_BUF_START + eff_idx;
-            const copy_len = @min(sub_len, 512 - eff_idx);
-            @memcpy(heap[dst_base..][0..copy_len], heap[src_base..][0..copy_len]);
-            eff_idx += copy_len;
-            if (eff_idx >= 512) break;
-        }
-    }
+    // BARE METAL: Bulk clear bitmap with @memset (SIMD-accelerated)
+    @memset(heap[DIRTY_BITMAP_START..][0..BITMAP_WORDS], 0);
+    _dirty_count = 0;
 
     _snap_len = eff_idx;
     return eff_idx;

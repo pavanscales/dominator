@@ -40,23 +40,30 @@ export function hoistEffects(instructions: Instruction[]): Instruction[] {
     let i = 0;
 
     while (i < instructions.length) {
-        const ins = instructions[i]!;
-
-        // Recurse into nested blocks
-        if (ins.nested) {
-            ins.nested = hoistEffects(ins.nested);
+        const insOrig = instructions[i]!;
+        let ins = insOrig;
+        if (insOrig.nested || insOrig.elseNested) {
+            ins = {
+                ...insOrig,
+                nested: insOrig.nested ? hoistEffects(insOrig.nested) : undefined,
+                elseNested: insOrig.elseNested ? hoistEffects(insOrig.elseNested) : undefined,
+            };
         }
 
-        // Try to merge consecutive dynamic effects on the same target
         if (_isDynamicEffect(ins)) {
             const target = _getEffectTarget(ins);
             const group: Instruction[] = [ins];
             let j = i + 1;
 
             while (j < instructions.length) {
-                const next = instructions[j]!;
+                const nextOrig = instructions[j]!;
+                let next = nextOrig;
                 if (_isDynamicEffect(next) && _getEffectTarget(next) === target) {
-                    if (next.nested) next.nested = hoistEffects(next.nested);
+                    if (nextOrig.nested || nextOrig.elseNested) next = {
+                        ...nextOrig,
+                        nested: nextOrig.nested ? hoistEffects(nextOrig.nested) : undefined,
+                        elseNested: nextOrig.elseNested ? hoistEffects(nextOrig.elseNested) : undefined,
+                    };
                     group.push(next);
                     j++;
                 } else {
@@ -65,9 +72,6 @@ export function hoistEffects(instructions: Instruction[]): Instruction[] {
             }
 
             if (group.length > 1) {
-                // Merge into a single hoisted instruction
-                // The merged instruction carries all the original instructions
-                // The codegen will emit them inside a single effect()
                 result.push({
                     op: 'hoisted',
                     target: target,

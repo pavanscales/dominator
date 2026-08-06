@@ -82,15 +82,20 @@ export const renderToString = (instructions: SSRInstruction[]): string => {
         const frame = stack[stack.length - 1]!;
         const node = nodes.get(frame.id);
 
-        if (!node || node.tag === 'text') {
-            if (node) push(_escapeHtml(node.text));
+        if (!node) {
+            stack.pop();
+            continue;
+        }
+
+        if (node.tag === 'text') {
+            push(_escapeHtml(node.text));
             stack.pop();
             continue;
         }
 
         if (frame.phase === 0) {
             push('<');
-            push(node.tag);
+            push(_escapeHtml(node.tag));
             const attrKeys = Object.keys(node.attrs);
             for (let i = 0; i < attrKeys.length; i++) {
                 push(' ');

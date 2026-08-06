@@ -82,6 +82,9 @@ const _localBuf = new Int32Array(QUEUE_CAPACITY * JOB_SIZE);
 let _localHead = 0;
 let _localTail = 0;
 
+// Pre-allocated buffer for drainJobsByType — avoids massive allocation per call
+const _drainTypeBuf = new Int32Array(QUEUE_CAPACITY * JOB_SIZE);
+
 function _ensureShared(): Int32Array {
     if (_sharedView) return _sharedView;
     _sharedBuffer = new SharedArrayBuffer(TOTAL_SHARED_SIZE * 4);
@@ -125,34 +128,40 @@ function _pushJob(job: Job): boolean {
 function _popJob(): Job | null {
     // Try shared buffer first
     if (_sharedView) {
-        const head = Atomics.load(_sharedView, 0);
-        const tail = Atomics.load(_sharedView, 1);
+        while (true) {
+            const head = Atomics.load(_sharedView, 0);
+            const tail = Atomics.load(_sharedView, 1);
 
-        if (head === tail) return null;
+            if (head === tail) return null;
 
-        const base = HEADER_SIZE + head * JOB_SIZE;
-        const job: Job = {
-            type: _sharedView[base],
-            id: _sharedView[base + 1],
-            data: _sharedView[base + 2],
-            priority: _sharedView[base + 3],
-            callback: null,
-        };
+            const base = HEADER_SIZE + head * JOB_SIZE;
+            const jobId = _sharedView[base + 1];
+            const job: Job = {
+                type: _sharedView[base],
+                id: jobId,
+                data: _sharedView[base + 2],
+                priority: _sharedView[base + 3],
+                callback: _jobCallbacks[jobId] || null,
+            };
 
-        Atomics.store(_sharedView, 0, (head + 1) & QUEUE_MASK);
-        return job;
+            const prev = Atomics.compareExchange(_sharedView, 0, head, (head + 1) & QUEUE_MASK);
+            if (prev === head) {
+                return job;
+            }
+        }
     }
 
     // Local ring buffer fallback
     if (_localHead === _localTail) return null;
 
     const base = _localHead * JOB_SIZE;
+    const jobId = _localBuf[base + 1];
     const job: Job = {
         type: _localBuf[base],
-        id: _localBuf[base + 1],
+        id: jobId,
         data: _localBuf[base + 2],
         priority: _localBuf[base + 3],
-        callback: null,
+        callback: _jobCallbacks[jobId] || null,
     };
 
     _localHead = (_localHead + 1) & QUEUE_MASK;
@@ -255,6 +264,9 @@ export function submitJobBatch(type: JobType, dataArray: Int32Array, count: numb
 
 export function drainJobs(): number {
     let executed = 0;
+    const pending = getJobScheduler().pendingJobs;
+    const completed = getJobScheduler().completedJobs;
+
     let job = _popJob();
     while (job) {
         if (job.callback) {
@@ -262,28 +274,56 @@ export function drainJobs(): number {
             job.callback(job.data);
             getJobScheduler().totalWorkTime += performance.now() - start;
         }
-        getJobScheduler().completedJobs[job.type]++;
+        completed[job.type]++;
+        pending[job.type]--;
         getJobScheduler().totalJobsCompleted++;
         executed++;
         job = _popJob();
     }
+
     return executed;
 }
 
 export function drainJobsByType(type: JobType, maxJobs: number = Infinity): number {
     let executed = 0;
     let job = _popJob();
-    while (job && executed < maxJobs) {
+    const pending = getJobScheduler().pendingJobs;
+    const completed = getJobScheduler().completedJobs;
+    const totalCompleted = getJobScheduler().totalJobsCompleted;
+    let bufIdx = 0;
+
+    // Collect jobs of target type to execute, buffer others for re-queue
+    while (job) {
         if (job.type === type) {
             if (job.callback) {
                 job.callback(job.data);
             }
-            getJobScheduler().completedJobs[job.type]++;
-            getJobScheduler().totalJobsCompleted++;
+            completed[type]++;
+            pending[type]--;
             executed++;
+            getJobScheduler().totalJobsCompleted++;
+        } else {
+            // Non-matching job: buffer for re-queue after current type's drain
+            _drainTypeBuf[bufIdx++] = job.type;
+            _drainTypeBuf[bufIdx++] = job.id;
+            _drainTypeBuf[bufIdx++] = job.data;
+            _drainTypeBuf[bufIdx++] = job.priority;
         }
         job = _popJob();
     }
+
+    // Re-queue buffered non-matching jobs (pending already counted from original submitJob)
+    for (let i = 0; i < bufIdx; i += 4) {
+        const qJob: Job = {
+            type: _drainTypeBuf[i],
+            id: _drainTypeBuf[i + 1],
+            data: _drainTypeBuf[i + 2],
+            priority: _drainTypeBuf[i + 3],
+            callback: null,
+        };
+        _pushJob(qJob);
+    }
+
     return executed;
 }
 
@@ -295,11 +335,22 @@ export function waitForType(type: JobType, timeoutMs: number = 100): boolean {
     const start = performance.now();
     const s = getJobScheduler();
     const targetCount = s.pendingJobs[type];
+    let lastCount = targetCount;
 
     while (s.completedJobs[type] < targetCount) {
-        drainJobsByType(type);
-        if (performance.now() - start > timeoutMs) {
-            return false;
+        const before = s.completedJobs[type];
+        drainJobsByType(type, Infinity);
+        const after = s.completedJobs[type];
+
+        if (before === after) {
+            // No progress, check timeout
+            if (performance.now() - start > timeoutMs) {
+                return false;
+            }
+            // No-op yield — Atomics.wait is forbidden on the main thread in browsers
+        } else {
+            // Progress made, continue
+            lastCount = targetCount - after;
         }
     }
     return true;

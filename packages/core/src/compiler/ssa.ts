@@ -5,6 +5,7 @@ export interface Instruction {
     target: string;
     args: (string | number | boolean)[];
     nested?: Instruction[];
+    elseNested?: Instruction[];
 }
 
 export const ssa = (ast: ASTNode): Instruction[] => {
@@ -55,7 +56,9 @@ export const ssa = (ast: ASTNode): Instruction[] => {
                 case 'If': {
                     const childInstructions: Instruction[] = [];
                     if (node.children) serialize(node.children, childInstructions);
-                    push({ op: 'if', target: id, args: [String(node.expression ?? '')], nested: childInstructions });
+                    const elseInstructions: Instruction[] = [];
+                    if (node.else?.children) serialize(node.else.children, elseInstructions);
+                    push({ op: 'if', target: id, args: [String(node.expression ?? ''), String(node.elseCondition ?? '')], nested: childInstructions, elseNested: elseInstructions });
                     break;
                 }
                 case 'Program':

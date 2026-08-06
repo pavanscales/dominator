@@ -89,7 +89,6 @@ let _stageHistory: Float64Array[] = [];
 for (let i = 0; i < NUM_STAGES; i++) {
     _stageHistory.push(new Float64Array(MAX_FRAME_HISTORY));
 }
-let _stageHistoryWriteIdx = 0;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // P99 COMPUTATION — pre-allocated sort buffer, incremental
@@ -98,6 +97,7 @@ let _stageHistoryWriteIdx = 0;
 let _p99SortBuffer = new Float64Array(MAX_FRAME_HISTORY);
 let _runningSum = 0;
 let _runningWorst = 0;
+let _stageSums = new Float64Array(NUM_STAGES);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SCHEDULER METRICS
@@ -148,20 +148,21 @@ const STAGE_DEGRADE_PRIORITY: number[] = [
 type StageCallback = (budget: number, stats: FrameStats, degrade: number) => boolean;
 
 export interface FrameScheduler {
-    rafId: number;
-    running: boolean;
-    frameNumber: number;
-    stageBudgets: Float64Array;
-    stageCallbacks: (StageCallback | null)[];
-    stageDegrade: Uint8Array;     // per-stage degradation flags
-    metrics: SchedulerMetrics;
-    onFrame: ((stats: FrameStats) => void) | null;
-    _frameStartTime: number;
-    _stageTimings: Float64Array;
-    _reusableStats: FrameStats;
-    groupDispatch: ((group: Stage[], stats: FrameStats, degrade: number) => void) | null;
-    maxBudgetMs: number;          // current frame budget (4.167 for 240fps)
-}
+     rafId: number;
+     running: boolean;
+     frameNumber: number;
+     stageBudgets: Float64Array;
+     stageCallbacks: (StageCallback | null)[];
+     stageDegrade: Uint8Array;     // per-stage degradation flags
+     metrics: SchedulerMetrics;
+     onFrame: ((stats: FrameStats) => void) | null;
+     _frameStartTime: number;
+     _stageTimings: Float64Array;
+     _reusableStats: FrameStats;
+     groupDispatch: ((group: Stage[], stats: FrameStats, degrade: number) => void) | null;
+     maxBudgetMs: number;          // current frame budget (4.167 for 240fps)
+     culpritStage: number;
+ }
 
 let _scheduler: FrameScheduler | null = null;
 
@@ -229,7 +230,8 @@ export function createScheduler(frameBudgetMs: number = FRAME_BUDGET_240FPS): Fr
         _frameStartTime: 0,
         _stageTimings: _reusableStageTimings,
         _reusableStats: _reusableStats,
-        maxBudgetMs: frameBudgetMs,
+    maxBudgetMs: frameBudgetMs,
+        culpritStage: 0,
     };
     _scheduler = s;
     return s;
@@ -281,11 +283,21 @@ function _maybeYield(s: FrameScheduler, frameStart: number, groupIdx: number): v
 
 function _pushFrameTime(frameTime: number, stageTimings: Float64Array): void {
     const idx = _historyWriteIdx & MAX_FRAME_HISTORY_MASK;
+
+    // Subtract old value from running sum when ring buffer overwrites
+    if (_historyCount >= MAX_FRAME_HISTORY) {
+        _runningSum -= _historyBuffer[idx];
+        for (let i = 0; i < NUM_STAGES; i++) {
+            _stageSums[i] -= _stageHistory[i][idx];
+        }
+    }
+
     _historyBuffer[idx] = frameTime;
 
     // Per-stage timing history
     for (let i = 0; i < NUM_STAGES; i++) {
         _stageHistory[i][idx] = stageTimings[i];
+        _stageSums[i] += stageTimings[i];
     }
 
     _historyWriteIdx++;
@@ -356,11 +368,60 @@ function _applyDegrade(s: FrameScheduler, level: number, culpritStage: number): 
             degrade[Stage.GPU] = Degrade.SKIP;
             break;
     }
+    s.culpritStage = culpritStage;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // FRAME LOOP — ZERO ALLOCATION, HARD REAL-TIME
 // ═══════════════════════════════════════════════════════════════════════════
+
+import { logError, incrementCounter } from '../logging';
+
+// Error boundary: a throwing stage must never kill the frame loop or prevent
+// the next requestAnimationFrame from being scheduled. The stage is marked
+// SKIP for the remainder of the frame so later stages don't consume its
+// partially-written output, and the error is structured-logged.
+function _safeStageRun(
+    s: FrameScheduler,
+    stage: Stage,
+    budget: number,
+    stats: FrameStats,
+    degradeFlag: number,
+): void {
+    const cb = s.stageCallbacks[stage];
+    if (!cb) return;
+    try {
+        cb(budget, stats, degradeFlag);
+    } catch (err) {
+        s.stageDegrade[stage] = Degrade.SKIP;
+        incrementCounter('stage_errors');
+        logError('frame.stage_error', { stage, frame: s.frameNumber }, err);
+    }
+}
+
+function _slowestStage(s: FrameScheduler, group: Stage[], timings: Float64Array): number {
+    let slowest = group[0];
+    let max = -1;
+    for (let i = 0; i < group.length; i++) {
+        if (timings[group[i]] > max) {
+            max = timings[group[i]];
+            slowest = group[i];
+        }
+    }
+    return slowest;
+}
+
+function _slowestStageOverall(timings: Float64Array): number {
+    let slowest = 1;
+    let max = -1;
+    for (let i = 1; i < NUM_STAGES; i++) {
+        if (timings[i] > max) {
+            max = timings[i];
+            slowest = i;
+        }
+    }
+    return slowest;
+}
 
 function _executeFrame(s: FrameScheduler): void {
     const frameStart = performance.now();
@@ -385,7 +446,6 @@ function _executeFrame(s: FrameScheduler): void {
     const timings = stats.stageTimings;
     for (let i = 0; i < NUM_STAGES; i++) timings[i] = 0;
 
-    const callbacks = s.stageCallbacks;
     const budgets = s.stageBudgets;
     const degrade = s.stageDegrade;
     const budgetMs = s.maxBudgetMs;
@@ -404,31 +464,31 @@ function _executeFrame(s: FrameScheduler): void {
         // COOPERATIVE YIELD: if ahead of schedule, yield between stage groups
         _maybeYield(s, frameStart, g);
 
-        // HARD REAL-TIME CHECK: if we're over budget, degrade remaining stages
-        elapsed = performance.now() - frameStart;
-        if (elapsed >= budgetMs && g > 1) {
-            degradeLevel = _computeDegrade(elapsed, budgetMs);
-            _applyDegrade(s, degradeLevel, group[0]);
-            culprit = group[0];
-            stats.degradeLevel = degradeLevel;
-            stats.culpritStage = culprit;
-            break; // Apply degradation to remaining groups
-        }
-
         if (group.length === 1) {
             const stage = group[0];
             const d = degrade[stage];
             if (d & Degrade.SKIP) {
                 timings[stage] = 0;
-                continue;
+            } else {
+                stageStart = performance.now();
+                _safeStageRun(s, stage, budgets[stage], stats, d);
+                timings[stage] = performance.now() - stageStart;
             }
-            stageStart = performance.now();
-            if (callbacks[stage]) callbacks[stage]!(budgets[stage], stats, d);
-            timings[stage] = performance.now() - stageStart;
         } else if (s.groupDispatch) {
             const groupDegrade = degrade[group[0]];
-            if (groupDegrade & Degrade.SKIP) continue;
-            s.groupDispatch(group, stats, groupDegrade);
+            if (groupDegrade & Degrade.SKIP) {
+                for (let i = 0; i < group.length; i++) timings[group[i]] = 0;
+            } else {
+                stageStart = performance.now();
+                try {
+                    s.groupDispatch(group, stats, groupDegrade);
+                } catch (err) {
+                    for (let i = 0; i < group.length; i++) s.stageDegrade[group[i]] = Degrade.SKIP;
+                    incrementCounter('stage_errors');
+                    logError('frame.group_error', { group: g, frame: s.frameNumber }, err);
+                }
+                timings[group[0]] = performance.now() - stageStart;
+            }
         } else {
             for (let i = 0; i < group.length; i++) {
                 const stage = group[i];
@@ -438,42 +498,22 @@ function _executeFrame(s: FrameScheduler): void {
                     continue;
                 }
                 stageStart = performance.now();
-                if (callbacks[stage]) callbacks[stage]!(budgets[stage], stats, d);
+                _safeStageRun(s, stage, budgets[stage], stats, d);
                 timings[stage] = performance.now() - stageStart;
             }
         }
-    }
 
-    // Run remaining groups with degradation flags set
-    for (let g = 0; g < STAGE_GROUPS.length; g++) {
-        const group = STAGE_GROUPS[g];
-        const stage0 = group[0];
-
-        // Skip groups already processed before degradation was triggered
-        if (g <= STAGE_GROUPS.length / 2) {
-            _maybeYield(s, frameStart, g);
-        }
-        const d = degrade[stage0];
-        if (d & Degrade.SKIP) {
-            for (let i = 0; i < group.length; i++) timings[group[i]] = 0;
-            continue;
-        }
-
-        if (group.length === 1) {
-            stageStart = performance.now();
-            if (callbacks[stage0]) callbacks[stage0]!(budgets[stage0], stats, d);
-            timings[stage0] = performance.now() - stageStart;
-        } else if (s.groupDispatch) {
-            s.groupDispatch(group, stats, d);
-        } else {
-            for (let i = 0; i < group.length; i++) {
-                const stage = group[i];
-                const d2 = degrade[stage];
-                if (d2 & Degrade.SKIP) { timings[stage] = 0; continue; }
-                stageStart = performance.now();
-                if (callbacks[stage]) callbacks[stage]!(budgets[stage], stats, d2);
-                timings[stage] = performance.now() - stageStart;
-            }
+        // HARD REAL-TIME CHECK — evaluated AFTER the group runs so the culprit
+        // reported is the group that actually consumed the frame budget, not
+        // the next stage about to run. Critical stages (INPUT/SIGNALS, groups
+        // 0-1) always run at full quality; degradation starts at ANIMATION.
+        elapsed = performance.now() - frameStart;
+        if (elapsed >= budgetMs && g >= 1 && degradeLevel === 0) {
+            degradeLevel = _computeDegrade(elapsed, budgetMs);
+            culprit = _slowestStage(s, group, timings);
+            _applyDegrade(s, degradeLevel, culprit);
+            stats.degradeLevel = degradeLevel;
+            stats.culpritStage = culprit;
         }
     }
 
@@ -488,9 +528,14 @@ function _executeFrame(s: FrameScheduler): void {
         m.droppedFrames++;
         if (degradeLevel === 0) {
             degradeLevel = _computeDegrade(stats.totalFrameTime, FRAME_BUDGET_240FPS);
+            culprit = _slowestStageOverall(timings);
+            _applyDegrade(s, degradeLevel, culprit);
+            stats.degradeLevel = degradeLevel;
+            stats.culpritStage = culprit;
         }
     }
     if (degradeLevel > 0) m.degradedFrames++;
+    stats.culpritStage = s.culpritStage;
 
     m.averageFrameTime = _runningSum / _historyCount;
     m.worstFrameTime = _runningWorst;
@@ -553,7 +598,6 @@ export function resetMetrics(): void {
     _historyCount = 0;
     _runningSum = 0;
     _runningWorst = 0;
-    _stageHistoryWriteIdx = 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -582,7 +626,6 @@ export function tickSync(): FrameStats {
     const timings = stats.stageTimings;
     for (let i = 0; i < NUM_STAGES; i++) timings[i] = 0;
 
-    const callbacks = s.stageCallbacks;
     const budgets = s.stageBudgets;
     const degrade = s.stageDegrade;
     for (let i = 0; i < NUM_STAGES; i++) degrade[i] = 0;
@@ -597,17 +640,23 @@ export function tickSync(): FrameStats {
         if (group.length === 1) {
             if (d & Degrade.SKIP) { timings[stage0] = 0; continue; }
             stageStart = performance.now();
-            if (callbacks[stage0]) callbacks[stage0]!(budgets[stage0], stats, d);
+            _safeStageRun(s, stage0, budgets[stage0], stats, d);
             timings[stage0] = performance.now() - stageStart;
         } else if (s.groupDispatch) {
-            s.groupDispatch(group, stats, d);
+            try {
+                s.groupDispatch(group, stats, d);
+            } catch (err) {
+                for (let i = 0; i < group.length; i++) s.stageDegrade[group[i]] = Degrade.SKIP;
+                incrementCounter('stage_errors');
+                logError('frame.group_error', { group: g, frame: s.frameNumber }, err);
+            }
         } else {
             for (let i = 0; i < group.length; i++) {
                 const st = group[i];
                 const d2 = degrade[st];
                 if (d2 & Degrade.SKIP) { timings[st] = 0; continue; }
                 stageStart = performance.now();
-                if (callbacks[st]) callbacks[st]!(budgets[st], stats, d2);
+                _safeStageRun(s, st, budgets[st], stats, d2);
                 timings[st] = performance.now() - stageStart;
             }
         }
@@ -619,6 +668,7 @@ export function tickSync(): FrameStats {
     m.totalFrames++;
     _pushFrameTime(stats.totalFrameTime, timings);
     if (stats.totalFrameTime > FRAME_BUDGET_240FPS) m.droppedFrames++;
+    stats.culpritStage = s.culpritStage;
     m.averageFrameTime = _runningSum / _historyCount;
     m.worstFrameTime = _runningWorst;
     m.p99FrameTime = _computePercentile(_historyBuffer, _historyCount, 99);

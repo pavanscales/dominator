@@ -174,10 +174,12 @@ export function physicsSetMode(mode: number): void {
 
 // Direct position accessors — reads from WASM memory directly (zero-copy)
 export function physicsGetPositionX(i: number): number {
-    return _wasmF32 ? _wasmF32[i] : 0;
+    if (!_wasmF32 || i < 0 || i >= _count) return 0;
+    return _wasmF32[i];
 }
 export function physicsGetPositionY(i: number): number {
-    return _wasmF32 ? _wasmF32[_count + i] : 0;
+    if (!_wasmF32 || i < 0 || i >= _count) return 0;
+    return _wasmF32[_count + i];
 }
 // Bulk position view — zero-copy slice of WASM memory
 export function physicsGetPositionsView(): { x: Float32Array; y: Float32Array } | null {
@@ -189,6 +191,12 @@ export function physicsGetPositionsView(): { x: Float32Array; y: Float32Array } 
 }
 
 // Legacy API compatibility
-export function physicsGetPositionsX(): Float32Array | null { return null; }
-export function physicsGetPositionsY(): Float32Array | null { return null; }
+export function physicsGetPositionsX(): Float32Array | null {
+    console.warn('[dominator] physicsGetPositionsX is deprecated. Use physicsGetPositionX(i) instead.');
+    return null;
+}
+export function physicsGetPositionsY(): Float32Array | null {
+    console.warn('[dominator] physicsGetPositionsY is deprecated. Use physicsGetPositionY(i) instead.');
+    return null;
+}
 export function physicsGetCount(): number { return _count; }

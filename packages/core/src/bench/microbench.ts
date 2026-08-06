@@ -55,8 +55,12 @@ export function bench(
     const oh = calibrate(10000);
 
     const probeStart = now();
-    const probeCount = 10000;
-    for (let i = 0; i < probeCount; i++) fn();
+    // Bounded probe: time-boxed instead of a fixed 10k iterations so a slow op
+    // (e.g. a set() fanning out to 10K effects) cannot run for minutes.
+    const probeDeadline = Number(probeStart) + 10_000_000; // 10ms in ns
+    let probeCount = 0;
+    while (Number(now()) < probeDeadline) { fn(); probeCount++; }
+    if (probeCount === 0) probeCount = 1;
     const probeNs = elapsedNs(probeStart);
     const estimateNs = probeNs / probeCount;
 

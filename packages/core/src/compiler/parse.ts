@@ -15,6 +15,7 @@ export interface ASTNode {
     value?: string | number;
     expression?: string;
     context?: string;
+    elseCondition?: string;
     else?: ASTNode;
     isStatic?: boolean;
     loc?: SourceLocation;
@@ -290,8 +291,15 @@ export class Parser {
         const tagName = parts[0];
         if (tagName === 'each') {
             const asIndex = parts.indexOf('as');
-            const expression = parts.slice(1, asIndex).join(' ');
-            const context = parts.slice(asIndex + 1).join(' ');
+            let expression: string;
+            let context: string;
+            if (asIndex === -1) {
+                expression = parts.slice(1).join(' ');
+                context = '';
+            } else {
+                expression = parts.slice(1, asIndex).join(' ');
+                context = parts.slice(asIndex + 1).join(' ');
+            }
             const children = this._parseChildren();
             this._advance();
             return { type: 'Each', expression, context, children, loc: t.loc };
@@ -300,12 +308,17 @@ export class Parser {
             const expression = parts.slice(1).join(' ');
             const children = this._parseChildren();
             let elseNode: ASTNode | undefined;
+            let elseCondition: string | undefined;
             if (this._current()?.type === 'blockCont' && this._current().value.startsWith('else')) {
-                this._advance();
-                elseNode = { type: 'Else', children: this._parseChildren() };
+                const elseToken = this._advance();
+                const elseParts = elseToken.value.split(/\s+/);
+                if (elseParts.length > 1 && elseParts[1] === 'if') {
+                    elseCondition = elseParts.slice(2).join(' ');
+                }
+                elseNode = { type: 'Else', expression: elseCondition, children: this._parseChildren() };
             }
             this._advance();
-            return { type: 'If', expression, children, else: elseNode, loc: t.loc };
+            return { type: 'If', expression, children, else: elseNode, elseCondition, loc: t.loc };
         }
         throw new Error(`Unknown block type: ${tagName}`);
     }

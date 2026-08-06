@@ -42,19 +42,29 @@ export function flattenEffects(instructions: Instruction[]): Instruction[] {
     for (let i = 0; i < instructions.length; i++) {
         const ins = instructions[i]!;
 
-        if (ins.nested) {
-            ins.nested = flattenEffects(ins.nested);
+        let current = ins;
+        if (ins.nested || ins.elseNested) {
+            current = {
+                ...ins,
+                nested: ins.nested ? flattenEffects(ins.nested) : undefined,
+                elseNested: ins.elseNested ? flattenEffects(ins.elseNested) : undefined,
+            };
         }
 
-        if (_isDynamicEffect(ins)) {
-            const target = ins.target;
-            const group: Instruction[] = [ins];
+        if (_isDynamicEffect(current)) {
+            const target = current.target;
+            const group: Instruction[] = [current];
             let j = i + 1;
 
             while (j < instructions.length) {
-                const next = instructions[j]!;
+                const nextOrig = instructions[j]!;
+                let next = nextOrig;
                 if (_isDynamicEffect(next) && next.target === target) {
-                    if (next.nested) next.nested = flattenEffects(next.nested);
+                    if (nextOrig.nested || nextOrig.elseNested) next = {
+                        ...nextOrig,
+                        nested: nextOrig.nested ? flattenEffects(nextOrig.nested) : undefined,
+                        elseNested: nextOrig.elseNested ? flattenEffects(nextOrig.elseNested) : undefined,
+                    };
                     group.push(next);
                     j++;
                 } else {
@@ -70,11 +80,11 @@ export function flattenEffects(instructions: Instruction[]): Instruction[] {
                     nested: group,
                 });
             } else {
-                result.push(ins);
+                result.push(current);
             }
             i = j - 1;
         } else {
-            result.push(ins);
+            result.push(current);
         }
     }
 

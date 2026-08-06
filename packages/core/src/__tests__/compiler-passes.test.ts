@@ -26,7 +26,7 @@ describe('reorderInstructions', () => {
         ];
         const result = reorderInstructions(input);
         const ops = result.map(i => i.op);
-        expect(ops).toEqual(['create', 'attr', 'event', 'append', 'expr']);
+        expect(ops).toEqual(['create', 'attr', 'event', 'expr', 'append']);
     });
 
     it('preserves relative order within groups', () => {

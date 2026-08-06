@@ -35,8 +35,12 @@ function _isDynamicEffect(ins: Instruction): boolean {
 export function mergeEffectsByTarget(instructions: Instruction[]): Instruction[] {
     // Recurse into nested blocks first
     const processed = instructions.map(ins => {
-        if (ins.nested) {
-            return { ...ins, nested: mergeEffectsByTarget(ins.nested) };
+        if (ins.nested || ins.elseNested) {
+            return {
+                ...ins,
+                nested: ins.nested ? mergeEffectsByTarget(ins.nested) : undefined,
+                elseNested: ins.elseNested ? mergeEffectsByTarget(ins.elseNested) : undefined,
+            };
         }
         return ins;
     });

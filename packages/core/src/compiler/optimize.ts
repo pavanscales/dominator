@@ -11,16 +11,25 @@ export const optimize = (instructions: Instruction[]): Instruction[] => {
 };
 
 function _dce(instrs: Instruction[]): Instruction[] {
+    const removedTargets = new Set<string>();
     const filtered = instrs.filter((ins) => {
-        if (ins.op === 'text' && !ins.args[0]) return false;
+        if (ins.op === 'text' && !ins.args[0]) {
+            removedTargets.add(ins.target);
+            return false;
+        }
         if (ins.op === 'attr' && ins.args[1] === undefined) return false;
         return true;
     });
     const result: Instruction[] = [];
     for (let i = 0; i < filtered.length; i++) {
         const ins = filtered[i]!;
-        if (ins.nested) {
-            result.push({ ...ins, nested: _dce(ins.nested) });
+        if (ins.op === 'append' && removedTargets.has(ins.args[0] as string)) continue;
+        if (ins.nested || ins.elseNested) {
+            result.push({
+                ...ins,
+                nested: ins.nested ? _dce(ins.nested) : undefined,
+                elseNested: ins.elseNested ? _dce(ins.elseNested) : undefined,
+            });
         } else {
             result.push(ins);
         }
@@ -40,8 +49,12 @@ function _foldStatic(instrs: Instruction[]): Instruction[] {
             const folded = _tryFoldExpression(val);
             if (folded !== null) {
                 result.push({ ...ins, args: [ins.args[0], folded] });
-            } else if (ins.nested) {
-                result.push({ ...ins, nested: _foldStatic(ins.nested) });
+            } else if (ins.nested || ins.elseNested) {
+                result.push({
+                    ...ins,
+                    nested: ins.nested ? _foldStatic(ins.nested) : undefined,
+                    elseNested: ins.elseNested ? _foldStatic(ins.elseNested) : undefined,
+                });
             } else {
                 result.push(ins);
             }
@@ -49,13 +62,21 @@ function _foldStatic(instrs: Instruction[]): Instruction[] {
             const folded = _tryFoldExpression(ins.args[0]);
             if (folded !== null) {
                 result.push({ ...ins, args: [folded], op: 'text' });
-            } else if (ins.nested) {
-                result.push({ ...ins, nested: _foldStatic(ins.nested) });
+            } else if (ins.nested || ins.elseNested) {
+                result.push({
+                    ...ins,
+                    nested: ins.nested ? _foldStatic(ins.nested) : undefined,
+                    elseNested: ins.elseNested ? _foldStatic(ins.elseNested) : undefined,
+                });
             } else {
                 result.push(ins);
             }
-        } else if (ins.nested) {
-            result.push({ ...ins, nested: _foldStatic(ins.nested) });
+        } else if (ins.nested || ins.elseNested) {
+            result.push({
+                ...ins,
+                nested: ins.nested ? _foldStatic(ins.nested) : undefined,
+                elseNested: ins.elseNested ? _foldStatic(ins.elseNested) : undefined,
+            });
         } else {
             result.push(ins);
         }
@@ -110,8 +131,12 @@ function _mergeStaticText(instrs: Instruction[]): Instruction[] {
                 i++;
             }
         } else {
-            if (ins.nested) {
-                result.push({ ...ins, nested: _mergeStaticText(ins.nested) });
+            if (ins.nested || ins.elseNested) {
+                result.push({
+                    ...ins,
+                    nested: ins.nested ? _mergeStaticText(ins.nested) : undefined,
+                    elseNested: ins.elseNested ? _mergeStaticText(ins.elseNested) : undefined,
+                });
             } else {
                 result.push(ins);
             }
@@ -143,11 +168,19 @@ function _liftStaticBranches(instrs: Instruction[]): Instruction[] {
                 continue;
             }
             if (_CONSTANT_FALSE.test(cond)) {
+                if (ins.elseNested) {
+                    const inlined = _liftStaticBranches(ins.elseNested);
+                    for (let j = 0; j < inlined.length; j++) result.push(inlined[j]!);
+                }
                 continue;
             }
         }
-        if (ins.nested) {
-            result.push({ ...ins, nested: _liftStaticBranches(ins.nested) });
+        if (ins.nested || ins.elseNested) {
+            result.push({
+                ...ins,
+                nested: ins.nested ? _liftStaticBranches(ins.nested) : undefined,
+                elseNested: ins.elseNested ? _liftStaticBranches(ins.elseNested) : undefined,
+            });
         } else {
             result.push(ins);
         }
@@ -167,6 +200,7 @@ function _isFullyStaticBlock(instrs: Instruction[]): boolean {
         if (ins.op === 'attr' && typeof ins.args[1] === 'string' && ins.args[1].startsWith('{')) return false;
         if (ins.op === 'each' || ins.op === 'if') return false;
         if (ins.nested && !_isFullyStaticBlock(ins.nested)) return false;
+        if (ins.elseNested && !_isFullyStaticBlock(ins.elseNested)) return false;
     }
     return true;
 }
@@ -179,8 +213,12 @@ function _inlineSmallEffects(instrs: Instruction[]): Instruction[] {
         if (ins.op === 'if' && ins.nested && _isFullyStaticBlock(ins.nested) && (_CONSTANT_TRUE.test(String(ins.args[0])) || _CONSTANT_FALSE.test(String(ins.args[0])))) {
             const inlined = _inlineSmallEffects(ins.nested);
             for (let j = 0; j < inlined.length; j++) result.push(inlined[j]!);
-        } else if (ins.nested) {
-            result.push({ ...ins, nested: _inlineSmallEffects(ins.nested) });
+        } else if (ins.nested || ins.elseNested) {
+            result.push({
+                ...ins,
+                nested: ins.nested ? _inlineSmallEffects(ins.nested) : undefined,
+                elseNested: ins.elseNested ? _inlineSmallEffects(ins.elseNested) : undefined,
+            });
         } else {
             result.push(ins);
         }

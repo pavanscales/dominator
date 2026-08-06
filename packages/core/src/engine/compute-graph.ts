@@ -4,25 +4,8 @@
  * Every signal, computed, effect, layout, paint, and GPU node is a vertex.
  * Edges = dependencies. Propagation = topological BFS through stages.
  *
- * ARCHITECTURE:
- *
- *   Signal ──→ Computed ──→ Effect ──→ Layout ──→ Paint ──→ GPU
- *     │            │            │           │          │        │
- *     └────────────┴────────────┴───────────┴──────────┴────────┘
- *                           │
- *                     Frame Stages
- *                (parallel dispatch per stage)
- *
  * STORAGE: SoA — all properties in flat typed arrays, zero object overhead.
- *
- * COMPUTE GRAPH FLOW:
- *   1. Signal system calls markSignalDirty(signalId) when value changes
- *   2. Computed nodes re-evaluate their dependencies
- *   3. Effects execute and mark ECS entities dirty
- *   4. ECS dirty entities flow through LAYOUT → PAINT → GPU stages
  */
-
-import { getWorld, Flag } from './ecs';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NODE TYPES
@@ -98,41 +81,27 @@ export function createGraph(capacity: number = INITIAL_CAP): ComputeGraph {
     let cap = 1;
     while (cap < capacity) cap *= 2;
 
-    const g: ComputeGraph = {
+    return {
         nodeType: new Uint8Array(cap),
         entityRef: new Int32Array(cap).fill(-1),
         signalRef: new Int32Array(cap).fill(-1),
         stageMask: new Uint32Array(cap),
         dirty: new Uint8Array(cap),
-
         outPtr: new Int32Array(cap).fill(-1),
         outLen: new Uint16Array(cap),
         outCap: new Uint16Array(cap),
-        outData: new Int32Array(cap * EDGE_GROW),
-
+        outData: new Int32Array(4096),
         inPtr: new Int32Array(cap).fill(-1),
         inLen: new Uint16Array(cap),
         inCap: new Uint16Array(cap),
-        inData: new Int32Array(cap * EDGE_GROW),
-
+        inData: new Int32Array(4096),
         count: 0,
         cap,
         outDataTop: 0,
         inDataTop: 0,
-        outDataCap: cap * EDGE_GROW,
-        inDataCap: cap * EDGE_GROW,
+        outDataCap: 4096,
+        inDataCap: 4096,
     };
-
-    _graph = g;
-    return g;
-}
-
-export function getGraph(): ComputeGraph {
-    return _ensureGraph();
-}
-
-export function destroyGraph(): void {
-    _graph = null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -180,7 +149,8 @@ function _growGraph(g: ComputeGraph): void {
 }
 
 function _ensureEdgeData(arr: 'out' | 'in', needed: number): void {
-    const g = _graph!;
+    const g = _graph;
+    if (!g) return;
     if (arr === 'out') {
         if (needed < g.outDataCap) return;
         const newCap = Math.max(needed * 2, g.outDataCap * 2);
@@ -259,39 +229,21 @@ function _addEdge(g: ComputeGraph, from: number, to: number): void {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PUBLIC API
-// ═══════════════════════════════════════════════════════════════════════════
-
-export function addNode(
-    nodeType: GraphNodeType,
-    entityId: number,
-    signalId: number,
-    stageMask: number,
-): number {
-    const g = _ensureGraph();
-    if (g.count >= g.cap) _growGraph(g);
-    const id = g.count++;
-    g.nodeType[id] = nodeType;
-    g.entityRef[id] = entityId;
-    g.signalRef[id] = signalId;
-    g.stageMask[id] = stageMask;
-    g.dirty[id] = 0;
-    _linkSignalNode(id, signalId);
-    return id;
-}
-
-export function addEdge(fromId: number, toId: number): void {
-    const g = _ensureGraph();
-    _addEdge(g, fromId, toId);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // O(1) DIRTY TRACKING — dirty node list + signal→node reverse index
 // ═══════════════════════════════════════════════════════════════════════════
 
 let _dirtyNodeList = new Int32Array(8192);
 let _dirtyNodeCount = 0;
 let _dirtyNodeCap = 8192;
+
+function _ensureDirtyList(): void {
+    if (_dirtyNodeCount < _dirtyNodeCap) return;
+    const newCap = _dirtyNodeCap * 2;
+    const nd = new Int32Array(newCap);
+    nd.set(_dirtyNodeList);
+    _dirtyNodeList = nd;
+    _dirtyNodeCap = newCap;
+}
 
 let _signalToNodeHead: Int32Array = new Int32Array(4096).fill(-1);
 let _signalToNodeNext: Int32Array = new Int32Array(INITIAL_CAP).fill(-1);
@@ -318,6 +270,42 @@ function _ensureSignalNext(id: number): void {
     _signalToNodeNext = nn;
 }
 
+let _entityToNodeHead: Int32Array = new Int32Array(INITIAL_CAP).fill(-1);
+let _entityToNodeNext: Int32Array = new Int32Array(INITIAL_CAP * 8).fill(-1);
+let _entityToNodeCap = INITIAL_CAP;
+
+function _ensureEntityIndex(entityId: number): void {
+    if (entityId < _entityToNodeCap) return;
+    const old = _entityToNodeCap;
+    const newCap = Math.max(entityId + 512, old * 2);
+    const nh = new Int32Array(newCap);
+    nh.fill(-1, old);
+    nh.set(_entityToNodeHead.subarray(0, old));
+    _entityToNodeHead = nh;
+
+    const nn = new Int32Array(newCap * 8);
+    nn.fill(-1, old * 8);
+    nn.set(_entityToNodeNext.subarray(0, old * 8));
+    _entityToNodeNext = nn;
+
+    _entityToNodeCap = newCap;
+}
+
+function _linkEntityNode(nodeId: number, entityId: number): void {
+    if (entityId < 0) return;
+    _ensureEntityIndex(entityId);
+    // Ensure _entityToNodeNext is large enough for this nodeId
+    if (nodeId >= _entityToNodeNext.length) {
+        const newLen = Math.max(nodeId + 256, _entityToNodeNext.length * 2);
+        const nn = new Int32Array(newLen);
+        nn.fill(-1, _entityToNodeNext.length);
+        nn.set(_entityToNodeNext);
+        _entityToNodeNext = nn;
+    }
+    _entityToNodeNext[nodeId] = _entityToNodeHead[entityId];
+    _entityToNodeHead[entityId] = nodeId;
+}
+
 function _linkSignalNode(nodeId: number, signalId: number): void {
     if (signalId < 0) return;
     _ensureSignalIndex(signalId);
@@ -326,21 +314,57 @@ function _linkSignalNode(nodeId: number, signalId: number): void {
     _signalToNodeHead[signalId] = nodeId;
 }
 
-function _ensureDirtyList(): void {
-    if (_dirtyNodeCount < _dirtyNodeCap) return;
-    _dirtyNodeCap *= 2;
-    const nd = new Int32Array(_dirtyNodeCap);
-    nd.set(_dirtyNodeList);
-    _dirtyNodeList = nd;
+// ═══════════════════════════════════════════════════════════════════════════
+// PUBLIC API
+// ═══════════════════════════════════════════════════════════════════════════
+
+export function addNode(
+    nodeType: GraphNodeType,
+    entityId: number,
+    signalId: number,
+    stageMask: number,
+): number {
+    const g = _ensureGraph();
+    if (g.count >= g.cap) _growGraph(g);
+    const id = g.count++;
+    g.nodeType[id] = nodeType;
+    g.entityRef[id] = entityId;
+    g.signalRef[id] = signalId;
+    g.stageMask[id] = stageMask;
+    g.dirty[id] = 0;
+    _linkEntityNode(id, entityId);
+    _linkSignalNode(id, signalId);
+    return id;
+}
+
+export function addEdge(fromId: number, toId: number): void {
+    const g = _ensureGraph();
+    _addEdge(g, fromId, toId);
+}
+
+export function markEntityDirty(entityId: number, stageMask: number): void {
+    const g = _graph;
+    if (!g) return;
+    if (entityId >= _entityToNodeCap) return;
+
+    let nodeId = _entityToNodeHead[entityId];
+    while (nodeId >= 0) {
+        if (nodeId < g.count && (g.stageMask[nodeId] & stageMask) && !g.dirty[nodeId]) {
+            g.dirty[nodeId] = 1;
+            _ensureDirtyList();
+            _dirtyNodeList[_dirtyNodeCount++] = nodeId;
+        }
+        nodeId = _entityToNodeNext[nodeId];
+    }
 }
 
 export function markSignalDirty(signalId: number): void {
+    if (signalId < 0 || signalId >= _signalToNodeCap) return;
     const g = _graph;
     if (!g) return;
-    if (signalId >= _signalToNodeCap) return;
     let nodeId = _signalToNodeHead[signalId];
-    while (nodeId >= 0 && nodeId < g.count) {
-        if (!g.dirty[nodeId]) {
+    while (nodeId >= 0) {
+        if (nodeId < g.count && !g.dirty[nodeId]) {
             g.dirty[nodeId] = 1;
             _ensureDirtyList();
             _dirtyNodeList[_dirtyNodeCount++] = nodeId;
@@ -349,32 +373,16 @@ export function markSignalDirty(signalId: number): void {
     }
 }
 
-export function markEntityDirty(entityId: number, stageMask: number): void {
-    const g = _graph;
-    if (!g) return;
-    for (let i = 0; i < g.count; i++) {
-        if (g.entityRef[i] === entityId && (g.stageMask[i] & stageMask) && !g.dirty[i]) {
-            g.dirty[i] = 1;
-            _ensureDirtyList();
-            _dirtyNodeList[_dirtyNodeCount++] = i;
-        }
-    }
+export function getGraph(): ComputeGraph {
+    return _ensureGraph();
 }
 
-export function getDirtyNodes(): Int32Array {
-    return _dirtyNodeList.subarray(0, _dirtyNodeCount);
-}
-
-export function getDirtyNodeCount(): number {
-    return _dirtyNodeCount;
+export function destroyGraph(): void {
+    _graph = null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PROPAGATION — topological BFS through the compute graph
-//
-// 1. Collect dirty root nodes from O(1) dirty list
-// 2. BFS to all downstream nodes, tracking ALL dirty nodes
-// 3. Return dirty count for per-stage dispatch
 // ═══════════════════════════════════════════════════════════════════════════
 
 let _bfsQueue = new Int32Array(32768);
@@ -411,7 +419,6 @@ export function propagateDirty(): number {
     _bfsTail = 0;
     _allDirtyCount = 0;
 
-    // Seed BFS queue from O(1) dirty root list
     const rootCount = _dirtyNodeCount;
     const roots = _dirtyNodeList;
     _ensureBfsQueue(_bfsTail + rootCount + 512);
@@ -425,26 +432,21 @@ export function propagateDirty(): number {
     }
     _dirtyNodeCount = 0;
 
-    // PREFETCH-ACCELERATED BFS — process 4 nodes per iteration
-    // Software pipelining: read 4 nodes' metadata upfront, then process all their edges
     const outPtr = g.outPtr;
     const outLen = g.outLen;
     const outData = g.outData;
     const dirty = g.dirty;
 
     while (_bfsHead < _bfsTail) {
-        // Batch 4 nodes: prefetch their outPtr/outLen into local vars
         const remaining = _bfsTail - _bfsHead;
         const batchSize = remaining < 4 ? remaining : 4;
 
-        // Ensure room for 4 nodes × typical max edges
         _ensureBfsQueue(_bfsTail + 512);
         let queue = _bfsQueue;
 
         let b0 = 0, b1 = 0, b2 = 0, b3 = 0;
         let l0 = 0, l1 = 0, l2 = 0, l3 = 0;
 
-        // Manual prefetch: read metadata for up to 4 nodes
         const h = _bfsHead;
         if (batchSize >= 1) { const n = queue[h];     b0 = outPtr[n]; l0 = outLen[n]; }
         if (batchSize >= 2) { const n = queue[h + 1]; b1 = outPtr[n]; l1 = outLen[n]; }
@@ -452,11 +454,16 @@ export function propagateDirty(): number {
         if (batchSize >= 4) { const n = queue[h + 3]; b3 = outPtr[n]; l3 = outLen[n]; }
         _bfsHead += batchSize;
 
-        // Refresh queue alias after potential growth
+        // Guarantee headroom for the FULL batch before enqueueing: a node's
+        // out-degree is bounded only by Uint16 max per edge block, so the
+        // four nodes in this batch can add up to l0+l1+l2+l3 entries. The
+        // per-batch +512 headroom at the loop top is NOT enough for dense
+        // fan-out graphs — grow now and re-read the (possibly reallocated)
+        // queue before the writes below.
+        const batchWrites = l0 + l1 + l2 + l3;
+        _ensureBfsQueue(_bfsTail + batchWrites + 16);
         queue = _bfsQueue;
 
-        // Process each node's edges — unrolled inner loops for common edge lengths
-        // Node 0
         let j = 0;
         while (j < l0) {
             const target = outData[b0 + j];
@@ -468,7 +475,6 @@ export function propagateDirty(): number {
             }
             j++;
         }
-        // Node 1
         j = 0;
         while (j < l1) {
             const target = outData[b1 + j];
@@ -480,7 +486,6 @@ export function propagateDirty(): number {
             }
             j++;
         }
-        // Node 2
         j = 0;
         while (j < l2) {
             const target = outData[b2 + j];
@@ -492,7 +497,6 @@ export function propagateDirty(): number {
             }
             j++;
         }
-        // Node 3
         j = 0;
         while (j < l3) {
             const target = outData[b3 + j];
@@ -516,8 +520,17 @@ export function propagateDirty(): number {
 let _stageOutputBuf = new Int32Array(8192);
 let _stageOutputCount = 0;
 
+export function getDirtyNodes(): Int32Array {
+    return _dirtyNodeList.subarray(0, _dirtyNodeCount);
+}
+
+export function getDirtyNodeCount(): number {
+    return _dirtyNodeCount;
+}
+
 export function getNodesByStage(stageMask: number): Int32Array {
-    const g = _graph!;
+    const g = _graph;
+    if (!g) return new Int32Array(0);
     _stageOutputCount = 0;
     const dirtyList = _allDirtyNodes;
     const dirtyCount = _allDirtyCount;
@@ -539,7 +552,8 @@ export function getStageNodeCount(): number {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export function clearDirty(): void {
-    const g = _graph!;
+    const g = _graph;
+    if (!g) return;
     const list = _allDirtyNodes;
     const count = _allDirtyCount;
     for (let i = 0; i < count; i++) {
@@ -549,13 +563,7 @@ export function clearDirty(): void {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// EFFECT CALLBACK EXECUTION — BARE METAL
-//
-// When the compute graph is active, effect callbacks are stored here and
-// executed by the frame scheduler's SIGNALS stage after dirty propagation.
-// This ELIMINATES the old signal system's subscriber dispatch entirely.
-//
-// STORAGE: flat array indexed by graph node ID, zero object overhead.
+// EFFECT CALLBACK EXECUTION
 // ═══════════════════════════════════════════════════════════════════════════
 
 let _effectCallbacks: (() => void)[] = new Array(4096);
@@ -571,17 +579,6 @@ export function registerEffectCallback(nodeId: number, fn: () => void): void {
     _effectCallbacks[nodeId] = fn;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// EXECUTE DIRTY EFFECTS — O(dirty), zero O(N) scan
-//
-// After propagateDirty(), iterate only dirty nodes.
-// For each EFFECT node, call its registered callback.
-// This is the BRIDGE between the compute graph and actual DOM mutations.
-//
-// GUARANTEE: every effect callback is called at most once per frame
-// (duplicate elimination via dirty bitmap, not hash set)
-// ═══════════════════════════════════════════════════════════════════════════
-
 export function executeDirtyEffects(): number {
     const g = _graph;
     if (!g) return 0;
@@ -594,7 +591,17 @@ export function executeDirtyEffects(): number {
         const nodeId = list[i];
         if (nodeType[nodeId] === GraphNodeType.EFFECT) {
             const fn = callbacks[nodeId];
-            if (fn) { fn(); executed++; }
+            if (fn) {
+                executed++;
+                try {
+                    fn();
+                } catch (err) {
+                    // A throwing effect must not stop the remaining effects.
+                    if (typeof console !== 'undefined' && console.error) {
+                        console.error('graph effect threw:', err);
+                    }
+                }
+            }
         }
     }
     return executed;

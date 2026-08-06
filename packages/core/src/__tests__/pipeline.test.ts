@@ -87,7 +87,7 @@ describe('compiler pipeline', () => {
             const ast = parse('<div></div>');
             const instructions = ssa(ast);
             const output = codegen(instructions, { stateImportPath: './my-state' });
-            expect(output).toContain("from './my-state'");
+            expect(output).toContain('from "./my-state"');
         });
 
         it('uses custom function name', () => {
