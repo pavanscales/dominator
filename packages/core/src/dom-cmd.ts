@@ -113,13 +113,14 @@ let _elemGen = 0;
 function _getElemId(node: Node): number {
     let id = (node as any)[DID_PROP] as number | undefined;
     if (id === undefined) {
+        let reclaimed = false;
         if (_nextElemId < MAX_ELEM_IDS) {
             id = _nextElemId++;
         } else {
-            // Table full — scan for stale slot (generation older than current frame)
+            // Table full — scan for stale slot (generation older than current frame).
             id = -1;
             let oldestGen = _elemGen;
-            let oldestIdx = -1;
+            let oldestIdx = 1;
             for (let i = 1; i < MAX_ELEM_IDS; i++) {
                 if (_elemIdGen[i] < _elemGen) {
                     id = i;
@@ -131,12 +132,17 @@ function _getElemId(node: Node): number {
                 }
             }
             if (id === -1) {
-                // All slots actively used this frame — evict oldest
-                id = oldestIdx !== -1 ? oldestIdx : 1;
-                const old = _elemIds[id];
-                if (old && old !== node) {
-                    delete (old as any)[DID_PROP];
-                }
+                // All slots actively used this frame — evict oldest (never slot 0).
+                id = oldestIdx;
+            }
+            reclaimed = true;
+        }
+        // A recycled slot must first be detached from its previous occupant so a
+        // stale reference can't re-claim this id and alias the new node.
+        if (reclaimed) {
+            const old = _elemIds[id];
+            if (old && old !== node) {
+                delete (old as any)[DID_PROP];
             }
         }
         (node as any)[DID_PROP] = id;
@@ -147,7 +153,6 @@ function _getElemId(node: Node): number {
 }
 
 export function _resetCmdBuffer(): void {
-    _cmdBuf = new Uint32Array(CMD_BUF_SIZE);
     _cmdWriteHead = 0;
     _cmdReadHead = 0;
     _strTable.length = 0;
@@ -160,11 +165,22 @@ export function _resetCmdBuffer(): void {
     _elemGen = 0;
 }
 
+export function _resetStrWriteOffset(): void {
+    // No-op — kept for API consistency
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // COMMAND EMITTERS
 // ═══════════════════════════════════════════════════════════════════════════
 
+function _ensureCmdSpace(n: number): void {
+    if (_cmdWriteHead + n > _cmdReadHead + CMD_BUF_SIZE) {
+        drainCmdBuffer();
+    }
+}
+
 function _emit1(op: number, elemId: number): void {
+    _ensureCmdSpace(2);
     const w = _cmdWriteHead;
     _cmdBuf[w & CMD_BUF_MASK] = op;
     _cmdBuf[(w + 1) & CMD_BUF_MASK] = elemId;
@@ -172,6 +188,7 @@ function _emit1(op: number, elemId: number): void {
 }
 
 function _emit2(op: number, elemId: number, a0: number, a1: number): void {
+    _ensureCmdSpace(4);
     const w = _cmdWriteHead;
     _cmdBuf[w & CMD_BUF_MASK] = op;
     _cmdBuf[(w + 1) & CMD_BUF_MASK] = elemId;
@@ -181,6 +198,7 @@ function _emit2(op: number, elemId: number, a0: number, a1: number): void {
 }
 
 function _emit3(op: number, elemId: number, a0: number, a1: number, a2: number): void {
+    _ensureCmdSpace(5);
     const w = _cmdWriteHead;
     _cmdBuf[w & CMD_BUF_MASK] = op;
     _cmdBuf[(w + 1) & CMD_BUF_MASK] = elemId;
@@ -204,6 +222,7 @@ export function cmdSetStyle(el: Node, prop: string, value: string): void {
 
 export function cmdSetText(el: Node, text: string): void {
     _emit1(OP_SET_TEXT, _getElemId(el));
+    _ensureCmdSpace(1);
     const w = _cmdWriteHead;
     _cmdBuf[w & CMD_BUF_MASK] = _intern(text);
     _cmdWriteHead = w + 1;
@@ -227,6 +246,7 @@ export function cmdSetProp(el: Node, prop: string, value: string): void {
 
 export function cmdRemoveAttr(el: Node, key: string): void {
     _emit1(OP_REMOVE_ATTR, _getElemId(el));
+    _ensureCmdSpace(1);
     const w = _cmdWriteHead;
     _cmdBuf[w & CMD_BUF_MASK] = _intern(key);
     _cmdWriteHead = w + 1;
@@ -247,8 +267,8 @@ const _nop: OpHandler = () => 1;
 
 const _setAttr: OpHandler = (buf, rh) => {
     const node = _elemIds[buf[(rh + 1) & CMD_BUF_MASK]];
-    if (node) {
-        (node as Element).setAttribute(
+    if (node instanceof Element) {
+        node.setAttribute(
             _strTable[buf[(rh + 2) & CMD_BUF_MASK]],
             _strTable[buf[(rh + 3) & CMD_BUF_MASK]]
         );
@@ -258,8 +278,8 @@ const _setAttr: OpHandler = (buf, rh) => {
 
 const _setStyle: OpHandler = (buf, rh) => {
     const node = _elemIds[buf[(rh + 1) & CMD_BUF_MASK]];
-    if (node) {
-        (node as HTMLElement).style.setProperty(
+    if (node instanceof HTMLElement) {
+        node.style.setProperty(
             _strTable[buf[(rh + 2) & CMD_BUF_MASK]],
             _strTable[buf[(rh + 3) & CMD_BUF_MASK]]
         );
@@ -277,24 +297,24 @@ const _setText: OpHandler = (buf, rh) => {
 
 const _addClass: OpHandler = (buf, rh) => {
     const node = _elemIds[buf[(rh + 1) & CMD_BUF_MASK]];
-    if (node) {
-        (node as Element).classList.add(_strTable[buf[(rh + 2) & CMD_BUF_MASK]]);
+    if (node instanceof Element) {
+        node.classList.add(_strTable[buf[(rh + 2) & CMD_BUF_MASK]]);
     }
     return 3;
 };
 
 const _rmClass: OpHandler = (buf, rh) => {
     const node = _elemIds[buf[(rh + 1) & CMD_BUF_MASK]];
-    if (node) {
-        (node as Element).classList.remove(_strTable[buf[(rh + 2) & CMD_BUF_MASK]]);
+    if (node instanceof Element) {
+        node.classList.remove(_strTable[buf[(rh + 2) & CMD_BUF_MASK]]);
     }
     return 3;
 };
 
 const _toggle: OpHandler = (buf, rh) => {
     const node = _elemIds[buf[(rh + 1) & CMD_BUF_MASK]];
-    if (node) {
-        (node as Element).classList.toggle(
+    if (node instanceof Element) {
+        node.classList.toggle(
             _strTable[buf[(rh + 2) & CMD_BUF_MASK]],
             buf[(rh + 3) & CMD_BUF_MASK] === 1
         );
@@ -313,8 +333,8 @@ const _setProp: OpHandler = (buf, rh) => {
 
 const _removeAttr: OpHandler = (buf, rh) => {
     const node = _elemIds[buf[(rh + 1) & CMD_BUF_MASK]];
-    if (node) {
-        (node as Element).removeAttribute(_strTable[buf[(rh + 2) & CMD_BUF_MASK]]);
+    if (node instanceof Element) {
+        node.removeAttribute(_strTable[buf[(rh + 2) & CMD_BUF_MASK]]);
     }
     return 3;
 };
