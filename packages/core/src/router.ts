@@ -90,7 +90,7 @@ function _splitSegments(path: string): string[] {
     return segments;
 }
 
-export const createRouter = (routes: Route[]): HTMLElement => {
+export const createRouter = (routes: Route[]): { element: HTMLElement; destroy: () => void } => {
     const root = document.createElement('div');
     root.className = 'dominator-router';
 
@@ -103,7 +103,7 @@ export const createRouter = (routes: Route[]): HTMLElement => {
         return _matchTrie(trie, pathname) || wildcardRoute;
     };
 
-    path.subscribe(() => {
+    const renderRoute = () => {
         const route = resolve(path.get());
         if (route) {
             const nextElement = route.component();
@@ -115,13 +115,21 @@ export const createRouter = (routes: Route[]): HTMLElement => {
             }
             currentElement = nextElement;
         }
-    });
+    };
 
-    const initialRoute = resolve(path.get());
-    if (initialRoute) {
-        currentElement = initialRoute.component();
-        root.appendChild(currentElement);
-    }
+    renderRoute();
 
-    return root;
+    const unsub = path.subscribe(renderRoute);
+
+    return {
+        element: root,
+        destroy: () => {
+            unsub();
+            if (currentElement) {
+                removeAllEventListeners(currentElement);
+                root.removeChild(currentElement);
+                currentElement = null;
+            }
+        },
+    };
 };
