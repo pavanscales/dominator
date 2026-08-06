@@ -596,6 +596,12 @@ function _runEffect(id: number): void {
 
 let _dispatchActive = false;
 
+// Optional error boundary installed by the host app. Invoked for every effect
+// that throws during dispatch (in addition to the structured log), so a
+// production app can escalate/alert without polling logs. Must return quickly
+// and never throw: dispatch continues for the remaining subscribers regardless.
+let _signalErrorHandler: ((error: unknown, effectId: number) => void) | null = null;
+
 // Per-depth subscriber snapshots. Dispatch must iterate a stable list: while
 // an effect runs it clears and re-establishes its own subscriptions, which
 // mutates _subsData in place (swap-with-last removal + append). Iterating the
@@ -650,6 +656,9 @@ function _runEffectGuarded(id: number): void {
         _runEffect(id);
     } catch (e) {
         logError('effect.dispatch-failed', { effectId: id }, e);
+        if (_signalErrorHandler) {
+            try { _signalErrorHandler(e, id); } catch { /* handler must not break dispatch */ }
+        }
     }
 }
 
@@ -972,6 +981,15 @@ export const flushSync = (): void => {
     if (cmdBufferPending()) {
         drainCmdBuffer();
     }
+};
+
+/**
+ * Install (or clear) the global signal error boundary. It is invoked for every
+ * effect that throws during dispatch, alongside the structured log, so a host
+ * app can escalate without parsing logs. Pass `null` to disable.
+ */
+export const setSignalErrorHandler = (handler: ((error: unknown, effectId: number) => void) | null): void => {
+    _signalErrorHandler = handler;
 };
 
 export const _resetSignals = (): void => {

@@ -270,6 +270,19 @@ export function setYieldFn(fn: YieldFn | null): void {
     _yieldFn = fn;
 }
 
+// Optional error boundary installed by the host app. Invoked for every stage
+// that throws, alongside the structured log, so a production app can escalate
+// without parsing logs. Must return quickly and never throw: the stage is still
+// degraded to SKIP for the remainder of the frame regardless of the handler.
+let _stageErrorHandler: ((error: unknown, stage: number) => void) | null = null;
+
+/**
+ * Install (or clear) the global stage error boundary. Pass `null` to disable.
+ */
+export function setStageErrorHandler(handler: ((error: unknown, stage: number) => void) | null): void {
+    _stageErrorHandler = handler;
+}
+
 function _maybeYield(s: FrameScheduler, frameStart: number, groupIdx: number): void {
     if (!_yieldFn) return;
     // Yield if we're at least 2ms ahead of schedule — only between independent groups
@@ -396,6 +409,9 @@ function _safeStageRun(
         s.stageDegrade[stage] = Degrade.SKIP;
         incrementCounter('stage_errors');
         logError('frame.stage_error', { stage, frame: s.frameNumber }, err);
+        if (_stageErrorHandler) {
+            try { _stageErrorHandler(err, stage); } catch { /* handler must not kill the loop */ }
+        }
     }
 }
 
@@ -458,98 +474,109 @@ function _executeFrame(s: FrameScheduler): void {
     let culprit = 0;
     let stageStart: number;
 
-    for (let g = 0; g < STAGE_GROUPS.length; g++) {
-        const group = STAGE_GROUPS[g];
+    try {
+        for (let g = 0; g < STAGE_GROUPS.length; g++) {
+            const group = STAGE_GROUPS[g];
 
-        // COOPERATIVE YIELD: if ahead of schedule, yield between stage groups
-        _maybeYield(s, frameStart, g);
+            // COOPERATIVE YIELD: if ahead of schedule, yield between stage groups
+            _maybeYield(s, frameStart, g);
 
-        if (group.length === 1) {
-            const stage = group[0];
-            const d = degrade[stage];
-            if (d & Degrade.SKIP) {
-                timings[stage] = 0;
-            } else {
-                stageStart = performance.now();
-                _safeStageRun(s, stage, budgets[stage], stats, d);
-                timings[stage] = performance.now() - stageStart;
-            }
-        } else if (s.groupDispatch) {
-            const groupDegrade = degrade[group[0]];
-            if (groupDegrade & Degrade.SKIP) {
-                for (let i = 0; i < group.length; i++) timings[group[i]] = 0;
-            } else {
-                stageStart = performance.now();
-                try {
-                    s.groupDispatch(group, stats, groupDegrade);
-                } catch (err) {
-                    for (let i = 0; i < group.length; i++) s.stageDegrade[group[i]] = Degrade.SKIP;
-                    incrementCounter('stage_errors');
-                    logError('frame.group_error', { group: g, frame: s.frameNumber }, err);
-                }
-                timings[group[0]] = performance.now() - stageStart;
-            }
-        } else {
-            for (let i = 0; i < group.length; i++) {
-                const stage = group[i];
+            if (group.length === 1) {
+                const stage = group[0];
                 const d = degrade[stage];
                 if (d & Degrade.SKIP) {
                     timings[stage] = 0;
-                    continue;
+                } else {
+                    stageStart = performance.now();
+                    _safeStageRun(s, stage, budgets[stage], stats, d);
+                    timings[stage] = performance.now() - stageStart;
                 }
-                stageStart = performance.now();
-                _safeStageRun(s, stage, budgets[stage], stats, d);
-                timings[stage] = performance.now() - stageStart;
+            } else if (s.groupDispatch) {
+                const groupDegrade = degrade[group[0]];
+                if (groupDegrade & Degrade.SKIP) {
+                    for (let i = 0; i < group.length; i++) timings[group[i]] = 0;
+                } else {
+                    stageStart = performance.now();
+                    try {
+                        s.groupDispatch(group, stats, groupDegrade);
+                    } catch (err) {
+                        for (let i = 0; i < group.length; i++) s.stageDegrade[group[i]] = Degrade.SKIP;
+                        incrementCounter('stage_errors');
+                        logError('frame.group_error', { group: g, frame: s.frameNumber }, err);
+                    }
+                    timings[group[0]] = performance.now() - stageStart;
+                }
+            } else {
+                for (let i = 0; i < group.length; i++) {
+                    const stage = group[i];
+                    const d = degrade[stage];
+                    if (d & Degrade.SKIP) {
+                        timings[stage] = 0;
+                        continue;
+                    }
+                    stageStart = performance.now();
+                    _safeStageRun(s, stage, budgets[stage], stats, d);
+                    timings[stage] = performance.now() - stageStart;
+                }
+            }
+
+            // HARD REAL-TIME CHECK — evaluated AFTER the group runs so the culprit
+            // reported is the group that actually consumed the frame budget, not
+            // the next stage about to run. Critical stages (INPUT/SIGNALS, groups
+            // 0-1) always run at full quality; degradation starts at ANIMATION.
+            elapsed = performance.now() - frameStart;
+            if (elapsed >= budgetMs && g >= 1 && degradeLevel === 0) {
+                degradeLevel = _computeDegrade(elapsed, budgetMs);
+                culprit = _slowestStage(s, group, timings);
+                _applyDegrade(s, degradeLevel, culprit);
+                stats.degradeLevel = degradeLevel;
+                stats.culpritStage = culprit;
             }
         }
 
-        // HARD REAL-TIME CHECK — evaluated AFTER the group runs so the culprit
-        // reported is the group that actually consumed the frame budget, not
-        // the next stage about to run. Critical stages (INPUT/SIGNALS, groups
-        // 0-1) always run at full quality; degradation starts at ANIMATION.
-        elapsed = performance.now() - frameStart;
-        if (elapsed >= budgetMs && g >= 1 && degradeLevel === 0) {
-            degradeLevel = _computeDegrade(elapsed, budgetMs);
-            culprit = _slowestStage(s, group, timings);
-            _applyDegrade(s, degradeLevel, culprit);
-            stats.degradeLevel = degradeLevel;
-            stats.culpritStage = culprit;
+        stats.totalFrameTime = performance.now() - frameStart;
+
+        // Update metrics
+        const m = s.metrics;
+        m.totalFrames++;
+        _pushFrameTime(stats.totalFrameTime, timings);
+
+        if (stats.totalFrameTime > FRAME_BUDGET_240FPS) {
+            m.droppedFrames++;
+            if (degradeLevel === 0) {
+                degradeLevel = _computeDegrade(stats.totalFrameTime, FRAME_BUDGET_240FPS);
+                culprit = _slowestStageOverall(timings);
+                _applyDegrade(s, degradeLevel, culprit);
+                stats.degradeLevel = degradeLevel;
+                stats.culpritStage = culprit;
+            }
+        }
+        if (degradeLevel > 0) m.degradedFrames++;
+        stats.culpritStage = s.culpritStage;
+
+        m.averageFrameTime = _runningSum / _historyCount;
+        m.worstFrameTime = _runningWorst;
+        m.p99FrameTime = _computePercentile(_historyBuffer, _historyCount, 99);
+
+        // Per-stage percentiles
+        const len = _historyCount;
+        for (let i = 0; i < NUM_STAGES; i++) {
+            m.stageP50[i] = _computePercentile(_stageHistory[i], len, 50);
+            m.stageP95[i] = _computePercentile(_stageHistory[i], len, 95);
+            m.stageP99[i] = _computePercentile(_stageHistory[i], len, 99);
+        }
+
+        if (s.onFrame) s.onFrame(stats);
+
+    } catch (error) {
+        // CRITICAL: Error boundary to prevent complete app freeze
+        // Mark current stage as skipped and continue to next frame
+        incrementCounter('frame_errors');
+        logError('frame.execute_error', { frame: s.frameNumber }, error);
+        if (_stageErrorHandler) {
+            try { _stageErrorHandler(error, -1); } catch { /* handler must not kill the loop */ }
         }
     }
-
-    stats.totalFrameTime = performance.now() - frameStart;
-
-    // Update metrics
-    const m = s.metrics;
-    m.totalFrames++;
-    _pushFrameTime(stats.totalFrameTime, timings);
-
-    if (stats.totalFrameTime > FRAME_BUDGET_240FPS) {
-        m.droppedFrames++;
-        if (degradeLevel === 0) {
-            degradeLevel = _computeDegrade(stats.totalFrameTime, FRAME_BUDGET_240FPS);
-            culprit = _slowestStageOverall(timings);
-            _applyDegrade(s, degradeLevel, culprit);
-            stats.degradeLevel = degradeLevel;
-            stats.culpritStage = culprit;
-        }
-    }
-    if (degradeLevel > 0) m.degradedFrames++;
-    stats.culpritStage = s.culpritStage;
-
-    m.averageFrameTime = _runningSum / _historyCount;
-    m.worstFrameTime = _runningWorst;
-    m.p99FrameTime = _computePercentile(_historyBuffer, _historyCount, 99);
-
-    // Per-stage percentiles
-    const len = _historyCount;
-    for (let i = 0; i < NUM_STAGES; i++) {
-        m.stageP50[i] = _computePercentile(_stageHistory[i], len, 50);
-        m.stageP95[i] = _computePercentile(_stageHistory[i], len, 95);
-        m.stageP99[i] = _computePercentile(_stageHistory[i], len, 99);
-    }
-
-    if (s.onFrame) s.onFrame(stats);
 
     if (s.running) {
         s.rafId = requestAnimationFrame(() => _executeFrame(s));
