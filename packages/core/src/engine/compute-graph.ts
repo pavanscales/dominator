@@ -149,7 +149,8 @@ function _growGraph(g: ComputeGraph): void {
 }
 
 function _ensureEdgeData(arr: 'out' | 'in', needed: number): void {
-    const g = _graph!;
+    const g = _graph;
+    if (!g) return;
     if (arr === 'out') {
         if (needed < g.outDataCap) return;
         const newCap = Math.max(needed * 2, g.outDataCap * 2);
@@ -372,14 +373,6 @@ export function markSignalDirty(signalId: number): void {
     }
 }
 
-export function getDirtyNodes(): Int32Array {
-    return _dirtyNodeList.subarray(0, _dirtyNodeCount);
-}
-
-export function getDirtyNodeCount(): number {
-    return _dirtyNodeCount;
-}
-
 export function getGraph(): ComputeGraph {
     return _ensureGraph();
 }
@@ -461,6 +454,14 @@ export function propagateDirty(): number {
         if (batchSize >= 4) { const n = queue[h + 3]; b3 = outPtr[n]; l3 = outLen[n]; }
         _bfsHead += batchSize;
 
+        // Guarantee headroom for the FULL batch before enqueueing: a node's
+        // out-degree is bounded only by Uint16 max per edge block, so the
+        // four nodes in this batch can add up to l0+l1+l2+l3 entries. The
+        // per-batch +512 headroom at the loop top is NOT enough for dense
+        // fan-out graphs — grow now and re-read the (possibly reallocated)
+        // queue before the writes below.
+        const batchWrites = l0 + l1 + l2 + l3;
+        _ensureBfsQueue(_bfsTail + batchWrites + 16);
         queue = _bfsQueue;
 
         let j = 0;
@@ -519,8 +520,17 @@ export function propagateDirty(): number {
 let _stageOutputBuf = new Int32Array(8192);
 let _stageOutputCount = 0;
 
+export function getDirtyNodes(): Int32Array {
+    return _dirtyNodeList.subarray(0, _dirtyNodeCount);
+}
+
+export function getDirtyNodeCount(): number {
+    return _dirtyNodeCount;
+}
+
 export function getNodesByStage(stageMask: number): Int32Array {
-    const g = _graph!;
+    const g = _graph;
+    if (!g) return new Int32Array(0);
     _stageOutputCount = 0;
     const dirtyList = _allDirtyNodes;
     const dirtyCount = _allDirtyCount;
@@ -542,7 +552,8 @@ export function getStageNodeCount(): number {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export function clearDirty(): void {
-    const g = _graph!;
+    const g = _graph;
+    if (!g) return;
     const list = _allDirtyNodes;
     const count = _allDirtyCount;
     for (let i = 0; i < count; i++) {
@@ -580,7 +591,17 @@ export function executeDirtyEffects(): number {
         const nodeId = list[i];
         if (nodeType[nodeId] === GraphNodeType.EFFECT) {
             const fn = callbacks[nodeId];
-            if (fn) { fn(); executed++; }
+            if (fn) {
+                executed++;
+                try {
+                    fn();
+                } catch (err) {
+                    // A throwing effect must not stop the remaining effects.
+                    if (typeof console !== 'undefined' && console.error) {
+                        console.error('graph effect threw:', err);
+                    }
+                }
+            }
         }
     }
     return executed;
