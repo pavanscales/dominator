@@ -24,7 +24,8 @@
 import {
     getWorld, Flag,
     STYLE_W, STYLE_H,
-    LAYOUT_X, LAYOUT_Y, LAYOUT_W, LAYOUT_H,
+    LAYOUT_X, LAYOUT_Y, LAYOUT_W, LAYOUT_H, LAYOUT_CW, LAYOUT_CH,
+    LAYOUT_FLOATS_PER_ENTITY,
 } from './ecs';
 import { _getDirtyList, _getDirtyCount } from './ecs';
 
@@ -135,6 +136,8 @@ export function setTextColor(entityId: number, r: number, g: number, b: number, 
 
 const MAX_GLYPHS = 4096;
 const _glyphAdvances = new Float64Array(MAX_GLYPHS);
+
+let _wordAdvBuf = new Float64Array(128);
 const _lineBreaks = new Uint16Array(256);
 let _glyphCacheKey = 0;
 let _glyphCacheGen = new Uint32Array(MAX_GLYPHS);
@@ -184,8 +187,9 @@ export function layoutText(entityId: number, maxWidth: number): TextLayoutResult
     const ctx = _getMeasureCtx();
     if (!ctx) {
         // Fallback: estimate width as character count * fontSize * 0.6
+        const safeMax = maxWidth > 0 ? maxWidth : 64;
         const estimatedWidth = text.length * fontSize * 0.6;
-        const estimatedLines = Math.max(1, Math.ceil(estimatedWidth / maxWidth));
+        const estimatedLines = Math.max(1, Math.ceil(estimatedWidth / safeMax));
         const estimatedHeight = estimatedLines * lineHeight;
         ts.measuredWidth[entityId] = Math.min(estimatedWidth, maxWidth);
         ts.measuredHeight[entityId] = estimatedHeight;
@@ -196,9 +200,13 @@ export function layoutText(entityId: number, maxWidth: number): TextLayoutResult
 
     ctx.font = fontStr;
 
-    // Measure each character's advance (simple approach: measure word by word)
+    // Measure each word's advance — reuse pre-allocated buffer
     const words = text.split(' ');
-    const wordAdvances = new Float64Array(words.length);
+    let wordAdvances = _wordAdvBuf;
+    if (words.length > wordAdvances.length) {
+        wordAdvances = new Float64Array(words.length);
+        _wordAdvBuf = wordAdvances;
+    }
     let totalWidth = 0;
     for (let i = 0; i < words.length; i++) {
         wordAdvances[i] = ctx.measureText(words[i] + ' ').width;
@@ -257,11 +265,12 @@ export function runTextLayoutStage(): number {
     for (let di = 0; di < dirtyCount; di++) {
         const i = dirtyList[di];
         if (w.flags[i] & Flag.HAS_TEXT) {
-            const lx = w.layout.data[i * 8 + 0];
-            const ly = w.layout.data[i * 8 + 1];
-            const lw = w.layout.data[i * 8 + 2];
-            const lh = w.layout.data[i * 8 + 3];
-            layoutText(i, Math.max(lw, 64));
+            const lw = w.layout.data[i * LAYOUT_FLOATS_PER_ENTITY + LAYOUT_W];
+            const result = layoutText(i, Math.max(lw, 64));
+            w.layout.data[i * LAYOUT_FLOATS_PER_ENTITY + LAYOUT_W] = result.width;
+            w.layout.data[i * LAYOUT_FLOATS_PER_ENTITY + LAYOUT_H] = result.height;
+            w.layout.data[i * LAYOUT_FLOATS_PER_ENTITY + LAYOUT_CW] = result.width;
+            w.layout.data[i * LAYOUT_FLOATS_PER_ENTITY + LAYOUT_CH] = result.height;
             processedCount++;
         }
     }
@@ -277,4 +286,5 @@ export function resetTextStore(): void {
     _textStore = null;
     _gen = 0;
     _measureCtx = null;
+    _wordAdvBuf = new Float64Array(128);
 }
