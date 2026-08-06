@@ -42,6 +42,7 @@ export interface VisibilitySystem {
 
 const MAX_DIRTY_REGIONS = 256;
 let _vis: VisibilitySystem | null = null;
+let _viewportChanged = false;
 
 export function createVisibilitySystem(): VisibilitySystem {
     _vis = {
@@ -76,6 +77,7 @@ export function setViewport(x: number, y: number, w: number, h: number): void {
     v.viewportW = w;
     v.viewportH = h;
     v.generation++;
+    _viewportChanged = true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -124,6 +126,9 @@ export function runVisibilityStage(skipFallback: boolean = false): { visible: nu
     const v = getVisibilitySystem();
     if (!v) return { visible: 0, culled: 0 };
 
+    // Reset dirty regions at the start of each frame
+    v.dirtyRegionCount = 0;
+
     let visibleCount = 0;
     let culledCount = 0;
 
@@ -160,9 +165,9 @@ export function runVisibilityStage(skipFallback: boolean = false): { visible: nu
 
     // Also check ALL entities if viewport changed (generation bump)
     // This ensures culled entities become visible when viewport scrolls back
-    // Only do this when viewport changes and there's no dirty list
     // skipFallback=true: skip the expensive full-scan (used when degraded)
-    if (dirtyCount === 0 && !skipFallback) {
+    if (_viewportChanged && !skipFallback) {
+        _viewportChanged = false;
         for (let i = 1; i < w.count; i++) {
             const flags = w.flags[i];
             if (flags & Flag.REMOVED) continue;
@@ -200,4 +205,5 @@ export function resetVisibilitySystem(): void {
         _vis.dirtyRegionCount = 0;
         _vis.generation = 0;
     }
+    _viewportChanged = false;
 }
