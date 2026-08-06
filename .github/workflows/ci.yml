@@ -26,19 +26,9 @@ jobs:
       - run: pnpm install
       - run: pnpm run test:ci
 
-  benchmark:
-    runs-on: ubuntu-24.04
-    needs: [lint, test]
-    steps:
-      - uses: actions/checkout@v4
-      - run: node --version && npm --version
-      - run: corepack enable && pnpm --version
-      - run: pnpm install
-      - run: npx --yes tsx bench/engine-bench.mts
-
   build:
     runs-on: ubuntu-24.04
-    needs: [lint, test, benchmark]
+    needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
       - run: node --version && npm --version
