@@ -53,11 +53,16 @@ export function reorderInstructions(instructions: Instruction[]): Instruction[] 
     const blocks: Instruction[] = [];
 
     for (let i = 0; i < instructions.length; i++) {
-        const ins = instructions[i]!;
+        const orig = instructions[i]!;
+        let ins = orig;
 
-        // Recurse into nested blocks
-        if (ins.nested) {
-            ins.nested = reorderInstructions(ins.nested);
+        // Recurse into nested and elseNested blocks immutably
+        if (orig.nested || orig.elseNested) {
+            ins = {
+                ...orig,
+                nested: orig.nested ? reorderInstructions(orig.nested) : undefined,
+                elseNested: orig.elseNested ? reorderInstructions(orig.elseNested) : undefined,
+            };
         }
 
         switch (ins.op) {
@@ -81,23 +86,26 @@ export function reorderInstructions(instructions: Instruction[]): Instruction[] 
                 appends.push(ins);
                 break;
             case 'expr':
-                creates.push(ins);
+                dynamicExprs.push(ins);
                 break;
             case 'each':
             case 'if':
+            case 'hoisted':
                 blocks.push(ins);
                 break;
         }
     }
 
     // Rebuild in optimized order
+    // CRITICAL: appends MUST come after dynamicExprs and blocks,
+    // because expr/block targets must be defined before they're appended.
     return [
         ...creates,
         ...texts,
         ...staticAttrs,
         ...events,
-        ...appends,
         ...dynamicExprs,
         ...blocks,
+        ...appends,
     ];
 }
