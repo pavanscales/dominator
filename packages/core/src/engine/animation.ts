@@ -279,6 +279,9 @@ export function updateTweens(deltaMs: number): number {
                 s.springMass[writeIdx] = s.springMass[readIdx];
                 s.springStiffness[writeIdx] = s.springStiffness[readIdx];
                 s.springDamping[writeIdx] = s.springDamping[readIdx];
+            } else {
+                // Unknown type (TIMELINE, NONE, etc.) — skip, don't compact
+                continue;
             }
         }
         writeIdx++;
