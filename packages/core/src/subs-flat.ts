@@ -6,7 +6,7 @@
  * TypeScript only calls through to the Zig exports.
  */
 
-import { getCore, SNAPSHOT_BUF_START } from './wasm-glue';
+import { getCore, getU32View, SNAPSHOT_BUF_START } from './wasm-glue';
 
 export function subsInit(signalId: number): void {
     getCore().subs_init(signalId);
@@ -36,9 +36,17 @@ export function subsForEach(signalId: number, fn: (effectId: number) => void): v
 }
 
 export function subsSnapshotInto(signalId: number, target: Uint32Array, maxLen: number): number {
-    return getCore().subs_snapshot(signalId, maxLen);
+    const len = getCore().subs_snapshot(signalId, maxLen);
+    if (len > 0) {
+        const snapStart = SNAPSHOT_BUF_START;
+        const u32 = getU32View();
+        for (let i = 0; i < len && i < target.length; i++) {
+            target[i] = u32[snapStart + i];
+        }
+    }
+    return len;
 }
 
 export function subsReset(): void {
-    getCore().arena_reset();
+    getCore().full_reset();
 }
