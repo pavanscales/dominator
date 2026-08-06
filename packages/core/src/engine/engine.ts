@@ -32,8 +32,9 @@
  * Frame arenas reset per stage: zero GC in hot path.
  */
 
-import { createWorld, getWorld, Flag, getDirtyEntityCount, clearDirtyFlags, type ECSWorld } from './ecs';
-import { createGraph, getGraph, getNodesByStage, getStageNodeCount, clearDirty, STAGE_SIGNAL, STAGE_EFFECT, STAGE_LAYOUT, STAGE_ANIMATION, STAGE_TEXT, STAGE_VISIBILITY, STAGE_PAINT, STAGE_GPU, type ComputeGraph } from './compute-graph';
+import { createWorld, getWorld, Flag, getDirtyEntityCount, clearDirtyFlags, destroyWorld, type ECSWorld } from './ecs';
+import { createGraph, getGraph, getNodesByStage, getStageNodeCount, clearDirty, propagateDirty, executeDirtyEffects, destroyGraph, STAGE_SIGNAL, STAGE_EFFECT, STAGE_LAYOUT, STAGE_ANIMATION, STAGE_TEXT, STAGE_VISIBILITY, STAGE_PAINT, STAGE_GPU, type ComputeGraph } from './compute-graph';
+import { logError } from '../logging';
 import {
     createScheduler, getScheduler, registerStage, startScheduler, stopScheduler,
     tickSync, setStageBudget, type FrameScheduler, type FrameStats, Stage, Degrade,
@@ -68,10 +69,7 @@ import {
     getVisibilitySystem, runVisibilityStage, setViewport, resetVisibilitySystem,
 } from './visibility';
 import type { WorkerPool } from './worker-pool';
-import { createWorkerPool, destroyWorkerPool, submitBatchToPool, submitToPool, waitForPool } from './worker-pool';
-
-// Pre-allocated buffer for parallel group dispatch — zero GC per frame
-const _groupStageBuf = new Int32Array(16);
+import { createWorkerPool, destroyWorkerPool } from './worker-pool';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // COMPUTE GRAPH → SIGNAL SYSTEM BRIDGE
@@ -108,6 +106,15 @@ export interface Engine {
 }
 
 let _engine: Engine | null = null;
+// Destruction guard: destroyEngine() is not atomic — a frame callback or a
+// concurrent destroyEngine() during teardown would touch destroyed module
+// singletons. The flag is set before any teardown and clears the engine ref,
+// so concurrent entry returns immediately instead of double-freeing.
+let _destroying = false;
+
+function setDestroying(v: boolean): void {
+    _destroying = v;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ENGINE CREATION
@@ -135,20 +142,43 @@ export async function createEngine(
     const jobScheduler = createJobScheduler();
     const profiler = createProfiler();
 
-    // Create renderer
-    const renderer = await createRendererAsync(rendererType, container, options.rendererOptions);
-
     // Create root entity
     const root = world.root;
 
-    // Set viewport
-    setViewport(0, 0, viewportW, viewportH);
+    let renderer: Renderer | null = null;
+    let workerPool: WorkerPool | null = null;
+    try {
+        // Create renderer
+        renderer = await createRendererAsync(rendererType, container, options.rendererOptions);
 
-    // Create worker pool for parallel stage dispatch
-    const workerPool = createWorkerPool();
+        // Set viewport
+        setViewport(0, 0, viewportW, viewportH);
 
-    // Wire up the frame scheduler stages (PEAK HPC PIPELINE)
-    _wireScheduler(scheduler, world, root, viewportW, viewportH, renderer, arena, profiler, workerPool);
+        // Create worker pool for parallel stage dispatch
+        workerPool = createWorkerPool();
+
+        // Wire up the frame scheduler stages (PEAK HPC PIPELINE)
+        _wireScheduler(scheduler, world, root, viewportW, viewportH, renderer, arena, profiler, workerPool);
+    } catch (err) {
+        // Partial-init cleanup: tear down every subsystem we already created so
+        // a failure mid-createEngine (e.g. WebGPU adapter init) does not leak
+        // the module singletons (_world/_graph/_scheduler/_arena/...).
+        logError('engine.init_failed', { rendererType }, err);
+        try { renderer?.destroy?.(); } catch { /* ignore */ }
+        try { destroyArena(); } catch { /* ignore */ }
+        try { destroyJobScheduler(); } catch { /* ignore */ }
+        try { destroyProfiler(); } catch { /* ignore */ }
+        try { destroyAnimationState(); } catch { /* ignore */ }
+        try { resetAnimationStage(); } catch { /* ignore */ }
+        try { resetTextStore(); } catch { /* ignore */ }
+        try { destroyGraph(); } catch { /* ignore */ }
+        try { destroyWorld(); } catch { /* ignore */ }
+        try { resetVisibilitySystem(); } catch { /* ignore */ }
+        try { workerPool && destroyWorkerPool(); } catch { /* ignore */ }
+        _engine = null;
+        setDestroying(false);
+        throw err;
+    }
 
     _engine = {
         world,
@@ -166,6 +196,7 @@ export async function createEngine(
         lastFrameTimestamp: 0,
         frameDelta: 0,
     };
+    setDestroying(false);
 
     return _engine!;
 }
@@ -237,10 +268,13 @@ function _wireScheduler(
     // ── Stage 1: INPUT (0.5ms) ──
     registerStage(Stage.INPUT, (_budget, stats, _degrade) => true);
 
-    // ── Stage 2: SIGNALS — pass-through (effects run immediately on signal.set())
+    // ── Stage 2: SIGNALS — propagate dirty compute-graph nodes and run
+    //     graph-registered effects. signal.set() marks nodes dirty via
+    //     markSignalDirty(); this stage consumes them each frame.
     registerStage(Stage.SIGNALS, (_budget, stats, _degrade) => {
-        stats.signalsUpdated = 0;
-        stats.effectsExecuted = 0;
+        stats.signalsUpdated = propagateDirty();
+        stats.effectsExecuted = executeDirtyEffects();
+        clearDirty();
         return true;
     });
 
@@ -311,44 +345,24 @@ function _wireScheduler(
         return true;
     });
 
-    // ── Parallel group dispatch: wire the scheduler to use the worker pool
-    //     for independent stages (ANIMATION, TEXT) that have no cross-dependencies.
-    //     TEXT stays on main thread (Canvas API requirement), ANIMATION is dispatched.
-    //     Future: when ECS data uses SharedArrayBuffer, both can run on workers.
+    // ── Parallel group dispatch: wire the scheduler to handle stage groups
+    //     that are declared independent (ANIMATION, TEXT).
+    //     Stage callbacks mutate main-thread JS state (animation tweens, Canvas
+    //     text measurement), so they cannot run inside workers today. Run each
+    //     stage on the main thread and record REAL measured timings — no fake
+    //     numbers. True worker parallelism is reserved for when ECS data moves
+    //     to a SharedArrayBuffer and stages can operate on shared memory.
     if (workerPool) {
         scheduler.groupDispatch = (group: Stage[], stats: FrameStats, degrade: number) => {
             const callbacks = scheduler.stageCallbacks;
             const budgets = scheduler.stageBudgets;
             const timings = stats.stageTimings;
 
-            // Submit all dispatchable stages to the pool as batch (reuse pre-allocated buffer)
-            for (let i = 0; i < group.length; i++) {
-                _groupStageBuf[i] = group[i];
-            }
-            // Submit each stage with its actual type
-            for (let i = 0; i < group.length; i++) {
-                submitToPool(group[i], i, _groupStageBuf[i], 0);
-            }
-
-            // Run main-thread-only stages (TEXT = Canvas API) on main thread
             for (let i = 0; i < group.length; i++) {
                 const stage = group[i];
-                if (stage === Stage.TEXT) {
-                    const stageStart = performance.now();
-                    if (callbacks[stage]) callbacks[stage]!(budgets[stage], stats, degrade);
-                    timings[stage] = performance.now() - stageStart;
-                }
-            }
-
-            // Wait for pool to drain all submitted jobs
-            waitForPool(4);
-
-            // Record timings for pool-dispatched stages (measured via main-thread wait)
-            for (let i = 0; i < group.length; i++) {
-                const stage = group[i];
-                if (stage !== Stage.TEXT && timings[stage] === 0) {
-                    timings[stage] = 0.1;
-                }
+                const stageStart = performance.now();
+                if (callbacks[stage]) callbacks[stage]!(budgets[stage], stats, degrade);
+                timings[stage] = performance.now() - stageStart;
             }
         };
     }
@@ -360,6 +374,7 @@ function _wireScheduler(
 
 export function startEngine(): void {
     if (!_engine) throw new Error('Engine not created');
+    if (_destroying) return;
     startScheduler();
 }
 
@@ -369,25 +384,36 @@ export function stopEngine(): void {
 
 export function tickEngine(): FrameStats {
     if (!_engine) throw new Error('Engine not created');
+    if (_destroying) throw new Error('Engine is being destroyed');
     return tickSync();
 }
 
 export function destroyEngine(): void {
+    if (_destroying) return; // concurrent destroy — already tearing down
     if (!_engine) return;
+    _destroying = true;
     stopScheduler();
-    _engine.renderer.destroy();
-    destroyArena();
-    destroyJobScheduler();
-    destroyProfiler();
-    destroyAnimationState();
-    resetTextStore();
-    resetVisibilitySystem();
-    destroyWorkerPool();
-    _engine = null;
+    try {
+        _engine.renderer.destroy();
+        destroyArena();
+        destroyJobScheduler();
+        destroyProfiler();
+        destroyAnimationState();
+        resetAnimationStage();
+        resetTextStore();
+        destroyGraph();
+        destroyWorld();
+        resetVisibilitySystem();
+        destroyWorkerPool();
+    } finally {
+        _engine = null;
+        _destroying = false;
+    }
 }
 
 export function getEngine(): Engine {
     if (!_engine) throw new Error('Engine not created');
+    if (_destroying) throw new Error('Engine is being destroyed');
     return _engine!;
 }
 
