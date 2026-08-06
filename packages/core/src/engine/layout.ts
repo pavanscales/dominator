@@ -308,10 +308,12 @@ function _layoutSubtree(
 
         let gapSpace = 0;
         let gapOffset = 0;
-        if (justify === JustifyContent.SPACE_BETWEEN && childCount > 1) {
-            gapSpace = freeSpace / (childCount - 1);
-        } else if (justify === JustifyContent.SPACE_AROUND && childCount > 0) {
-            gapOffset = freeSpace / childCount;
+        if (freeSpace > 0) {
+            if (justify === JustifyContent.SPACE_BETWEEN && childCount > 1) {
+                gapSpace = freeSpace / (childCount - 1);
+            } else if (justify === JustifyContent.SPACE_AROUND && childCount > 0) {
+                gapOffset = freeSpace / childCount;
+            }
         }
 
         // Position each child
@@ -337,13 +339,13 @@ function _layoutSubtree(
 
             if (isRow) {
                 childX = x + pl + mainOffset + childML;
-                childY = y + pt;
+                childY = y + pt + childMT;
 
                 // Cross-axis alignment
                 if (align === AlignItems.CENTER) {
-                    childY += (contentH - childH) / 2;
+                    childY += (contentH - childMT - childH - childMB) / 2;
                 } else if (align === AlignItems.FLEX_END) {
-                    childY += contentH - childH - childMB;
+                    childY += contentH - childMT - childH - childMB;
                 } else if (align === AlignItems.STRETCH) {
                     // Child height stretches to fill
                 }
