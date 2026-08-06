@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { signal, effect, computed, batch, flushSync, _resetSignals } from '../signal';
+import { signal, effect, computed, batch, flushSync, signalArray, _resetSignals } from '../signal';
 
 beforeEach(() => {
     _resetSignals();
@@ -288,5 +288,76 @@ describe('stress test', () => {
         unsubs.forEach((unsub) => unsub());
         s.set(2);
         // Original subs still fire, new (unsubscribed) ones don't
+    });
+});
+
+describe('multi-subscriber Zig effects (regression)', () => {
+    it('runs both effects on unbatched set', () => {
+        const s = signal(0);
+        let a = 0;
+        let b = 0;
+        effect(() => { a = s(); });
+        effect(() => { b = s(); });
+        expect(a).toBe(0);
+        expect(b).toBe(0);
+        s.set(5);
+        expect(a).toBe(5);
+        expect(b).toBe(5);
+    });
+
+    it('runs both effects on batched set', () => {
+        const s = signal(0);
+        let a = 0;
+        let b = 0;
+        effect(() => { a = s(); });
+        effect(() => { b = s(); });
+        batch(() => { s.set(5); });
+        expect(a).toBe(5);
+        expect(b).toBe(5);
+    });
+
+    it('only re-runs an effect when its own dep changes (dep pruning across effects)', () => {
+        const s = signal(0);
+        const t = signal(0);
+        let countA = 0;
+        let countB = 0;
+        let countC = 0;
+        effect(() => { s(); countA++; });
+        effect(() => { t(); countB++; });
+        effect(() => { t(); countC++; });
+
+        expect(countA).toBe(1);
+        s.set(1);
+        expect(countA).toBe(2);
+        expect(countB).toBe(1);
+        t.set(1);
+        expect(countB).toBe(2);
+        expect(countC).toBe(2);
+    });
+
+    it('dispatches three+ Zig subscribers via WASM snapshot', () => {
+        const s = signal(0);
+        let hits = 0;
+        for (let i = 0; i < 5; i++) {
+            effect(() => { s(); hits++; });
+        }
+        s.set(7);
+        expect(hits).toBe(10);
+        batch(() => { s.set(9); });
+        expect(hits).toBe(15);
+    });
+
+    it('handles signalArray with multiple subscribers', () => {
+        const arr = signalArray(3, 0);
+        let a = 0;
+        let b = 0;
+        effect(() => { a = arr.get(1); });
+        effect(() => { b = arr.get(1); });
+        arr.set(1, 42);
+        expect(a).toBe(42);
+        expect(b).toBe(42);
+        arr.setValues([1, 2, 3]);
+        expect(a).toBe(2);
+        expect(b).toBe(2);
     });
 });
