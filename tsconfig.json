@@ -4,7 +4,6 @@
         "packages/core/src/**/*.ts",
         "packages/stress-million-cells-grid/src/**/*.ts",
         "packages/*/src/**/*.ts",
-        "bench/**/*.ts",
         "scripts/**/*.ts"
     ],
     "exclude": [
