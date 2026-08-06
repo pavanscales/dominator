@@ -13,7 +13,7 @@
  *   - All backends: zero JS allocation in executeCommands() hot path
  */
 
-import { CmdType, getCommandBuffer, getCommandHead, getCommandTail, getGPUCommandBuffer, getGPUCommandHead, getCmdSize } from './render-graph';
+import { CmdType, getCommandBuffer, getCommandHead, getCommandTail, getGPUCommandBuffer, getGPUCommandHead, getCmdSize, isRenderGraphDegraded } from './render-graph';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RENDERER INTERFACE
@@ -38,9 +38,13 @@ export interface Renderer {
     present(): void;
 
     // Stats
-    drawCalls: number;
+drawCalls: number;
     trianglesRendered: number;
     frameTime: number;
+    // True when the render graph dropped commands/strings last frame (capacity
+    // overflow). Consumers should surface this (or skip) rather than present a
+    // silently torn frame.
+    degraded: boolean;
 }
 
 export interface RendererOptions {
@@ -84,9 +88,10 @@ export class DOMRenderer implements Renderer {
     type = RendererType.DOM;
     canvas: HTMLCanvasElement | null = null;
     container: HTMLElement | null = null;
-    drawCalls = 0;
+drawCalls = 0;
     trianglesRendered = 0;
     frameTime = 0;
+    degraded = false;
 
     private _root: HTMLElement | null = null;
     private _nodes: (HTMLElement | null)[] = [];
@@ -150,6 +155,7 @@ export class DOMRenderer implements Renderer {
     executeCommands(): void {
         const start = performance.now();
         this.drawCalls = 0;
+        this.degraded = isRenderGraphDegraded();
 
         const buf = getCommandBuffer();
         const head = getCommandHead();
@@ -294,9 +300,10 @@ export class CanvasRenderer implements Renderer {
     type = RendererType.CANVAS;
     canvas: HTMLCanvasElement | null = null;
     container: HTMLElement | null = null;
-    drawCalls = 0;
+drawCalls = 0;
     trianglesRendered = 0;
     frameTime = 0;
+    degraded = false;
 
     private _ctx: CanvasRenderingContext2D | null = null;
     private _pixelRatio = 1;
@@ -354,9 +361,10 @@ export class CanvasRenderer implements Renderer {
         return style;
     }
 
-    executeCommands(): void {
+executeCommands(): void {
         const start = performance.now();
         this.drawCalls = 0;
+        this.degraded = isRenderGraphDegraded();
         const ctx = this._ctx;
         if (!ctx) return;
 
@@ -442,9 +450,10 @@ export class WebGPURenderer implements Renderer {
     type = RendererType.WEBGPU;
     canvas: HTMLCanvasElement | null = null;
     container: HTMLElement | null = null;
-    drawCalls = 0;
+drawCalls = 0;
     trianglesRendered = 0;
     frameTime = 0;
+    degraded = false;
 
     private _gpu: any = null;
     private _device: any = null;
@@ -596,8 +605,15 @@ export class WebGPURenderer implements Renderer {
         }
     }
 
-    executeCommands(): void {
+executeCommands(): void {
         const start = performance.now();
+        this.degraded = isRenderGraphDegraded();
+        if (this.degraded) {
+            // Surfaced instead of presenting a silently torn frame: skip the
+            // reuse fast path and the buffer rebuild this frame.
+            this.frameTime = performance.now() - start;
+            return;
+        }
         if (!this._device || !this._context) return;
 
         const gpuBuf = getGPUCommandBuffer();
