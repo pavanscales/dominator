@@ -1,16 +1,16 @@
 /**
  * Arena: Thin TypeScript wrapper around Zig WASM arena allocator.
  *
- * v5 optimizations:
- * - Zero-copy string reads (subarray instead of slice)
+ * v6:
+ * - Strings are JS-backed (real WASM slot + JS value map): no WASM string
+ *   alloc, no memcpyAlias panic, no per-write leak
  * - Bounded object tracking (cleanup old mappings on write)
  * - Cached tag view with dirty flag
  */
 
 import {
-    getCore, getF64View, getU8View, getU32View,
+    getCore, getF64View, getU8View,
     TAG_START, TAG_NUMBER, TAG_STRING, TAG_BOOLEAN, TAG_OBJECT,
-    writeStringToWasm,
 } from './wasm-glue';
 
 // JS object map with cleanup
@@ -18,30 +18,35 @@ const _objectMap = new Map<number, unknown>();
 const _objectReverseMap = new Map<unknown, number>();
 let _nextObjectId = 0;
 
-// String change detection
+// String storage (JS-backed: slot id → string value)
 const _slotStringMap = new Map<number, string>();
-
-const _decoder = new TextDecoder('utf-8', { fatal: false });
 
 // Cached tag view
 let _cachedTagView: Uint8Array | null = null;
-let _cachedTagViewSize = -1;
 let _tagViewDirty = true;
-
-// Reusable buffer for medium strings (< 4KB)
-const _strBuf = new Uint8Array(4096);
 
 export { TAG_NUMBER, TAG_STRING, TAG_BOOLEAN, TAG_OBJECT };
 
 export const arenaSize = (): number => getCore().arena_size();
-export const arenaCapacity = (): number => getCore().arena_capacity();
+
+const SNAPSHOT_WORD_INDEX = 55808; // WASM snapshot buffer word index
 
 export function arenaCompact(liveBitmap: Uint32Array): number {
+    // arena_compact remaps WASM slot ids, but the JS maps and any live signal
+    // ids are keyed by the ORIGINAL ids. Compaction therefore corrupts those
+    // references. It is only safe at idle/reset — refuse otherwise rather than
+    // silently aliasing live data.
+    if (_slotStringMap.size > 0 || _objectMap.size > 0) {
+        throw new Error(
+            'arenaCompact(): unsafe while string/object values are live — signals or ' +
+            'objects still hold WASM ids that compaction would remap'
+        );
+    }
     const core = getCore();
     const u8 = getU8View();
-    u8.set(new Uint8Array(liveBitmap.buffer, liveBitmap.byteOffset, liveBitmap.byteLength), 55808 * 4);
+    u8.set(new Uint8Array(liveBitmap.buffer, liveBitmap.byteOffset, liveBitmap.byteLength), SNAPSHOT_WORD_INDEX * 4);
     _tagViewDirty = true;
-    return core.arena_compact(55808);
+    return core.arena_compact(SNAPSHOT_WORD_INDEX);
 }
 
 export function arenaAllocNum(value: number): number {
@@ -49,11 +54,16 @@ export function arenaAllocNum(value: number): number {
     return getCore().arena_alloc_num(value);
 }
 
+// String storage is fully JS-backed: a real WASM arena slot is consumed (so
+// arenaSize()/tags stay consistent) but the string bytes never touch WASM.
+// The old path staged bytes at DYNAMIC_START and copied them into the arena
+// string region that starts at the SAME address — the first alloc self-copied
+// and hit Zig's memcpyAlias trap ("unreachable"). It also leaked a new WASM
+// string on every write. JS-backing fixes both.
 export function arenaAllocStr(value: string): number {
     _tagViewDirty = true;
-    const core = getCore();
-    const { ptr, len } = writeStringToWasm(value);
-    const id = core.arena_alloc_str(ptr, len);
+    const id = getCore().arena_alloc_num(0);
+    getU8View()[TAG_START * 4 + id * 4] = TAG_STRING;
     _slotStringMap.set(id, value);
     return id;
 }
@@ -81,30 +91,7 @@ export function arenaReadNum(id: number): number {
 export function arenaReadStr(id: number): string {
     const tracked = _slotStringMap.get(id);
     if (tracked !== undefined) return tracked;
-
-    const core = getCore();
-    const u8 = getU8View();
-    const u32 = getU32View();
-
-    const stringId = Math.trunc(core.arena_read_num(id));
-    if (stringId < 0) return '';
-    const metaBase = 16384 + stringId * 2;
-    if (metaBase + 1 >= u32.length) return '';
-    const wordOffset = u32[metaBase];
-    const byteLen = u32[metaBase + 1];
-
-    const byteStart = wordOffset * 4;
-    if (byteStart + byteLen > u8.length) return '';
-
-    // Zero-copy: decode directly from WASM memory subarray
-    if (byteLen <= _strBuf.length) {
-        const view = u8.subarray(byteStart, byteStart + byteLen);
-        return _decoder.decode(view);
-    }
-
-    // Large string: slice only what's needed
-    const bytes = u8.slice(byteStart, byteStart + byteLen);
-    return _decoder.decode(bytes);
+    return '';
 }
 
 export function arenaReadBool(id: number): boolean {
@@ -128,10 +115,6 @@ export function arenaWriteStr(id: number, value: string): boolean {
     const oldValue = _slotStringMap.get(id);
     if (oldValue === value) return false;
     _slotStringMap.set(id, value);
-    const core = getCore();
-    const { ptr, len } = writeStringToWasm(value);
-    const newStrId = core.arena_alloc_str(ptr, len);
-    core.arena_write_num(id, newStrId);
     return true;
 }
 
@@ -190,7 +173,6 @@ export function arenaReset(): void {
     _slotStringMap.clear();
     _tagViewDirty = true;
     _cachedTagView = null;
-    _cachedTagViewSize = -1;
 }
 
 export function arenaGetNumView(): Float64Array {
@@ -210,7 +192,6 @@ export function arenaGetTagView(): Uint8Array {
     for (let i = 0; i < size; i++) {
         _cachedTagView[i] = u8[byteBase + i * 4];
     }
-    _cachedTagViewSize = size;
     _tagViewDirty = false;
     return _cachedTagView;
 }
