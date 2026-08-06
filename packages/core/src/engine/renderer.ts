@@ -13,7 +13,7 @@
  *   - All backends: zero JS allocation in executeCommands() hot path
  */
 
-import { CmdType, getCommandBuffer, getCommandHead, getCommandTail, getGPUCommandBuffer, getGPUCommandHead } from './render-graph';
+import { CmdType, getCommandBuffer, getCommandHead, getCommandTail, getGPUCommandBuffer, getGPUCommandHead, getCmdSize } from './render-graph';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RENDERER INTERFACE
@@ -154,25 +154,22 @@ export class DOMRenderer implements Renderer {
         const buf = getCommandBuffer();
         const head = getCommandHead();
         const tail = getCommandTail();
+        if (head === tail) {
+            this.frameTime = performance.now() - start;
+            return;
+        }
         let read = tail;
 
         while (read < head) {
             const type = buf[read & 0xFFFFF];
-            switch (type) {
-                case CmdType.RECT:
-                    this._executeRect(buf, read);
-                    read += 10;
-                    break;
-                case CmdType.BORDER:
-                    read += 5;
-                    break;
-                case CmdType.NOP:
-                    read += 1;
-                    break;
-                default:
-                    read += 1;
-                    break;
+            // Advance by the REAL command width for every type. Using the size
+            // table (not a per-case constant) means unknown/future command
+            // types still skip their full payload — a fixed `read += 1` here
+            // would desynchronize the read pointer from the write pointer.
+            if (type === CmdType.RECT) {
+                this._executeRect(buf, read);
             }
+            read += getCmdSize(type);
         }
 
         this.frameTime = performance.now() - start;
@@ -257,16 +254,25 @@ export class DOMRenderer implements Renderer {
             this._lastBorderWidth[entityIdx] = borderWidth;
             this._lastBorderRgba[entityIdx] = borderRgba;
         }
+        if (this._lastBorderWidth[entityIdx] > 0) {
+            const borderRgba = buf[(offset + 8) & 0xFFFFF];
+            if (this._lastBorderRgba[entityIdx] !== borderRgba) {
+                s.borderColor = _getRgbaString(borderRgba);
+                this._lastBorderRgba[entityIdx] = borderRgba;
+            }
+        }
 
         this.drawCalls++;
     }
 
     clear(): void {
-        // Return all nodes to pool instead of destroying
+        // Return all nodes to pool and remove from DOM
         for (let i = 0; i < this._nodesCap; i++) {
             const node = this._nodes[i];
             if (node) {
-                node.remove();
+                if (node.parentNode) {
+                    node.parentNode.removeChild(node);
+                }
                 if (this._poolSize < this._nodePool.length) {
                     this._nodePool[this._poolSize++] = node;
                 }
@@ -364,21 +370,11 @@ export class CanvasRenderer implements Renderer {
 
         while (read < head) {
             const type = buf[read & 0xFFFFF];
-            switch (type) {
-                case CmdType.RECT:
-                    this._drawRect(ctx, buf, read);
-                    read += 10;
-                    break;
-                case CmdType.BORDER:
-                    read += 5;
-                    break;
-                case CmdType.NOP:
-                    read += 1;
-                    break;
-                default:
-                    read += 1;
-                    break;
+            // Advance by the REAL command width — see DOM renderer note.
+            if (type === CmdType.RECT) {
+                this._drawRect(ctx, buf, read);
             }
+            read += getCmdSize(type);
         }
 
         this.frameTime = performance.now() - start;
