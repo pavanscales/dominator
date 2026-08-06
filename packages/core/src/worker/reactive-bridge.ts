@@ -95,6 +95,14 @@ export function initReactiveBridge(config: ReactiveBridgeConfig): Promise<void> 
                 resolve();
             }
         };
+        _worker.onerror = (err) => {
+            console.error('[dominator] Reactive bridge worker error:', err);
+            _active = false;
+        };
+        _worker.onmessageerror = () => {
+            console.error('[dominator] Reactive bridge worker message error');
+            _active = false;
+        };
     });
 }
 
@@ -197,6 +205,7 @@ async function _startListening(): Promise<void> {
 
         // Process any pending effects
         await _waitForEffects();
+        if (!_active) break;
     }
 
     _waiting = false;
