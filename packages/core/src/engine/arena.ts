@@ -57,7 +57,7 @@ export interface FrameArena {
     floatTop: number;
     strings: string[];
     stringTop: number;
-    temps: any[];
+    temps: unknown[];
     tempTop: number;
 
     // Partitioned arenas (independent reset)
@@ -222,8 +222,8 @@ export function arenaGetString(index: number): string {
     return getArena().strings[index];
 }
 
-export function arenaGetTemp(index: number): any {
-    return getArena().temps[index];
+export function arenaGetTemp<T = unknown>(index: number): T {
+    return getArena().temps[index] as T;
 }
 
 export function arenaGetEntityView(): Int32Array {
