@@ -33,7 +33,7 @@
 const QUEUE_CAPACITY = 65536;
 const QUEUE_MASK = QUEUE_CAPACITY - 1;
 const JOB_SIZE = 4; // type, id, data, priority
-const HEADER_SIZE = 4; // [0]=head, [1]=tail, [2]=active_worker_count, [3]=total_submitted
+const HEADER_SIZE = 4; // [0]=head, [1]=tail, [2]=active_worker_count, [3]=total_completed
 
 // Per-worker deques for work-stealing
 // Each worker has its own deque: [write_idx, steal_idx, ... data]
@@ -85,6 +85,12 @@ var workerIdx = -1;
 var dequeBuffer = null;
 var dequeView = null;
 var running = true;
+var HEADER_SIZE = 4;
+var QUEUE_CAPACITY = 65536;
+var QUEUE_MASK = QUEUE_CAPACITY - 1;
+var JOB_SIZE = 4;
+var DEQUE_CAPACITY = 4096;
+var DEQUE_MASK = DEQUE_CAPACITY - 1;
 
 // Callback registry: type -> handler(data)
 var callbacks = {};
@@ -216,6 +222,12 @@ export function createWorkerPool(maxWorkers?: number): WorkerPool {
 
     const workers: Worker[] = [];
 
+    // Revoke the blob URL only once every worker has signaled 'ready'. A worker
+    // that hasn't finished fetching the blob by revocation time would fail to
+    // load its script, silently producing an idle/dead worker.
+    let readyCount = 0;
+    let revoked = false;
+
     for (let i = 0; i < numWorkers; i++) {
         const worker = new Worker(blobUrl);
 
@@ -227,6 +239,12 @@ export function createWorkerPool(maxWorkers?: number): WorkerPool {
             if (msg.type === 'exec' && typeof msg.callbackId === 'number') {
                 const cb = _workerCallbacks[msg.callbackId];
                 if (cb) cb(msg.data);
+            } else if (msg.type === 'ready' && !revoked) {
+                readyCount++;
+                if (readyCount >= numWorkers) {
+                    revoked = true;
+                    URL.revokeObjectURL(blobUrl);
+                }
             }
         };
 
@@ -239,8 +257,6 @@ export function createWorkerPool(maxWorkers?: number): WorkerPool {
 
         workers.push(worker);
     }
-
-    URL.revokeObjectURL(blobUrl);
 
     _pool = {
         workers,
@@ -341,8 +357,11 @@ export function waitForPool(timeoutMs: number = 100): boolean {
     while (pool.totalCompleted < pool.totalSubmitted) {
         pool.totalCompleted = Atomics.load(sv, 3);
         if (performance.now() - start > timeoutMs) return false;
-        // Yield to workers
-        Atomics.wait(sv, 0, Atomics.load(sv, 0), 1);
+        // Atomics.wait is forbidden on the main thread in browsers.
+        // Use a short spin-yield instead.
+        for (let i = 0; i < 1000; i++) {
+            if (Atomics.load(sv, 3) >= pool.totalSubmitted) break;
+        }
     }
 
     return true;
