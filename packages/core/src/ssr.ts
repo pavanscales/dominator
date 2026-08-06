@@ -82,8 +82,13 @@ export const renderToString = (instructions: SSRInstruction[]): string => {
         const frame = stack[stack.length - 1]!;
         const node = nodes.get(frame.id);
 
-        if (!node || node.tag === 'text') {
-            if (node) push(_escapeHtml(node.text));
+        if (!node) {
+            stack.pop();
+            continue;
+        }
+
+        if (node.tag === 'text') {
+            push(_escapeHtml(node.text));
             stack.pop();
             continue;
         }
