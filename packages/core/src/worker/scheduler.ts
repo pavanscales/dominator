@@ -52,10 +52,13 @@ export function createSharedLayout(maxParticles: number): SharedLayout {
     // We can create offset views but for simplicity, use the full array
     // and index with stride
 
+    // NOTE: All typed arrays reference the same underlying buffer with stride FLOATS_PER_PARTICLE.
+    // Direct array access will NOT give correct per-component data.
+    // Use getParticlePos() / getParticleColor() accessor functions instead.
     return {
         buffer,
         header,
-        positions: fullData, // Actually the full array — use getParticlePos() below
+        positions: fullData,
         colors: fullData,
         velocityX: fullData,
         velocityY: fullData,
