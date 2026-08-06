@@ -30,8 +30,12 @@ coverage/
 /packages/core/src/zig/dominator_core_test.wasm*
 /packages/core/src/zig/test_wasm.wasm*
 /packages/core/test_shared.wasm*
-test_export2.o.o
+
+# Root-level build artifacts (*.o, *.o.o, *.a, *.a.o)
+*.o
+*.o.o
+*.a
+*.a.o
 
 # Lock artifacts
 nul
-pnpm-lock.yaml
