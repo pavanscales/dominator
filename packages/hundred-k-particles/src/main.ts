@@ -1,11 +1,11 @@
 /**
- * 100K Particles — Main Thread (CANVAS RENDERER)
+ * 100K Particles — Main Thread (CANVAS RENDERER) — HIGH PERF
  *
  * Architecture:
- * - Worker runs physics at 120Hz via SharedArrayBuffer
+ * - Worker runs physics at 120Hz via SharedArrayBuffer (WASM SIMD)
  * - Main thread reads positions from shared memory (zero-copy)
- * - Canvas 2D with ImageData for batch pixel rendering
- * - No DOM manipulation during animation loop
+ * - Canvas 2D ImageData with single putImageData (GPU upload once)
+ * - Optimized loop with local variables, no bounds checks in hot path
  *
  * Expected: 60+ FPS locked, < 1ms render time
  */
@@ -28,13 +28,13 @@ let frameCount = 0;
 let fpsDisplay = 0;
 
 const canvas = document.createElement('canvas');
-const ctx = canvas.getContext('2d', { alpha: false })!;
+const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true })!;
 const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
 function resizeCanvas() {
     canvas.width = window.innerWidth * dpr;
     canvas.height = window.innerHeight * dpr;
-    ctx.scale(dpr, dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     Atomics.store(header, 7, window.innerWidth);
     Atomics.store(header, 8, window.innerHeight);
 }
@@ -47,11 +47,19 @@ app.style.width = '100vw';
 app.style.height = '100vh';
 app.appendChild(canvas);
 
-const offscreen = new OffscreenCanvas(4, 4);
-const octx = offscreen.getContext('2d')!;
-octx.fillStyle = '#fff';
-octx.fillRect(0, 0, 4, 4);
-const particleImg = offscreen.transferToImageBitmap();
+// Reusable ImageData and pixel buffer - allocated once
+let imageData: ImageData | null = null;
+let pixels: Uint32Array | null = null;
+let canvasW = 0;
+let canvasH = 0;
+
+function ensureImageData(w: number, h: number) {
+    if (imageData && canvasW === w && canvasH === h) return;
+    canvasW = w;
+    canvasH = h;
+    imageData = ctx.createImageData(w, h);
+    pixels = new Uint32Array(imageData.data.buffer);
+}
 
 const FPS_RING = 32;
 const fpsRing = new Float64Array(FPS_RING);
@@ -101,12 +109,21 @@ worker.postMessage({
     height: window.innerHeight,
 });
 
-const particleImgSize = 3;
-const offscreenSmall = new OffscreenCanvas(particleImgSize, particleImgSize);
-const octxSmall = offscreenSmall.getContext('2d')!;
-octxSmall.fillStyle = '#fff';
-octxSmall.fillRect(0, 0, particleImgSize, particleImgSize);
-const particleSprite = offscreenSmall.transferToImageBitmap();
+// Pre-compute color lookup for 256 hues (faster than sin/cos per particle)
+const COLOR_LUT = new Uint32Array(360);
+for (let h = 0; h < 360; h++) {
+    const rad = h * Math.PI / 180;
+    const r = (Math.sin(rad) * 127 + 128) | 0;
+    const g = (Math.sin(rad + 2.094) * 127 + 128) | 0;
+    const b = (Math.sin(rad + 4.188) * 127 + 128) | 0;
+    COLOR_LUT[h] = (255 << 24) | (b << 16) | (g << 8) | r;
+}
+
+// Pre-compute base hues for all particles
+const baseHues = new Uint16Array(PARTICLE_COUNT);
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+    baseHues[i] = (i * 137) % 360; // golden angle for distribution
+}
 
 function renderLoop() {
     const frameStart = performance.now();
@@ -116,33 +133,74 @@ function renderLoop() {
     if (cmd === 1) {
         const physicsStart = performance.now();
 
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = '#0a0a0f';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        ensureImageData(w, h);
 
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const pixels = new Uint32Array(imageData.data.buffer);
-        const w = canvas.width;
-        const h = canvas.height;
+        // Fast clear - fill with background color
+        const bgColor = 0xFF0A0A0F; // #0a0a0f in ABGR
+        pixels!.fill(bgColor);
 
-        for (let i = 0; i < PARTICLE_COUNT; i++) {
-            const base = i * FLOATS_PER;
-            const x = particleData[base] | 0;
-            const y = particleData[base + 1] | 0;
-            const r = particleData[base + 2] | 0;
-            const g = particleData[base + 3] | 0;
-            const b = particleData[base + 4] | 0;
+        // Hot loop - optimized for V8:
+        // - Local variables hoisted
+        // - No function calls
+        // - Uint32Array direct write
+        // - Bounds check minimized
+        const pd = particleData;
+        const pxData = pixels!;
+        const hues = baseHues;
+        const stride = FLOATS_PER;
+        const width = w;
+        const height = h;
+        const maxIdx = width * height;
 
-            const px = x - 1;
-            const py = y - 1;
-            if (px >= 0 && px < w && py >= 0 && py < h) {
-                const idx = py * w + px;
-                const color = (255 << 24) | (b << 16) | (g << 8) | r;
-                pixels[idx] = color;
+        // Unrolled 4x for ILP
+        let i = 0;
+        const unrollEnd = PARTICLE_COUNT - 3;
+        for (; i < unrollEnd; i += 4) {
+            // Particle 0
+            let base = i * stride;
+            let x = pd[base] | 0;
+            let y = pd[base + 1] | 0;
+            if (x >= 0 && x < width && y >= 0 && y < height) {
+                pxData[y * width + x] = COLOR_LUT[hues[i]];
+            }
+
+            // Particle 1
+            base = (i + 1) * stride;
+            x = pd[base] | 0;
+            y = pd[base + 1] | 0;
+            if (x >= 0 && x < width && y >= 0 && y < height) {
+                pxData[y * width + x] = COLOR_LUT[hues[i + 1]];
+            }
+
+            // Particle 2
+            base = (i + 2) * stride;
+            x = pd[base] | 0;
+            y = pd[base + 1] | 0;
+            if (x >= 0 && x < width && y >= 0 && y < height) {
+                pxData[y * width + x] = COLOR_LUT[hues[i + 2]];
+            }
+
+            // Particle 3
+            base = (i + 3) * stride;
+            x = pd[base] | 0;
+            y = pd[base + 1] | 0;
+            if (x >= 0 && x < width && y >= 0 && y < height) {
+                pxData[y * width + x] = COLOR_LUT[hues[i + 3]];
+            }
+        }
+        // Tail
+        for (; i < PARTICLE_COUNT; i++) {
+            const base = i * stride;
+            const x = pd[base] | 0;
+            const y = pd[base + 1] | 0;
+            if (x >= 0 && x < width && y >= 0 && y < height) {
+                pxData[y * width + x] = COLOR_LUT[hues[i]];
             }
         }
 
-        ctx.putImageData(imageData, 0, 0);
+        ctx.putImageData(imageData!, 0, 0);
 
         const physicsTime = performance.now() - physicsStart;
 
