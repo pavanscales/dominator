@@ -17,34 +17,6 @@
  */
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PRE-COMPUTED STRING CACHE — zero allocation per transform build
-// ═══════════════════════════════════════════════════════════════════════════
-
-// Generation-based transform cache — zero allocation, zero GC, zero Map overhead
-const _XFORM_CACHE_SIZE = 1 << 14;
-const _XFORM_CACHE_MASK = _XFORM_CACHE_SIZE - 1;
-const _xformCacheKeys = new Int32Array(_XFORM_CACHE_SIZE);
-const _xformCacheVals: string[] = new Array(_XFORM_CACHE_SIZE);
-let _xformCacheGen = 0;
-const _xformCacheSeen = new Uint32Array(_XFORM_CACHE_SIZE);
-
-function _buildTransformCached(x: number, y: number): string {
-    const ix = x | 0;
-    const iy = y | 0;
-    const key = (ix * 10000 + iy) >>> 0;
-    const slot = (key ^ (key >>> 13) ^ (key >>> 23)) & _XFORM_CACHE_MASK;
-    const gen = _xformCacheGen;
-    if (_xformCacheSeen[slot] === gen && _xformCacheKeys[slot] === key) {
-        return _xformCacheVals[slot]!;
-    }
-    const val = 'translate3d(' + ix + 'px,' + iy + 'px,0)';
-    _xformCacheKeys[slot] = key;
-    _xformCacheVals[slot] = val;
-    _xformCacheSeen[slot] = gen;
-    return val;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // BARE METAL TRANSFORM BUILDERS
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -138,25 +110,6 @@ export function batchApplyTransforms(
     yArr: Float32Array,
     count: number
 ): void {
-    for (let i = 0; i < count; i++) {
-        els[i]!.style.transform = 'translate3d(' + (xArr[i] | 0) + 'px,' + (yArr[i] | 0) + 'px,0)';
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// BARE METAL: Direct position writes to pre-existing elements
-// Zero allocation — writes directly to style.transform property
-// Used by the WorkerScheduler for 120fps particle rendering
-// ═══════════════════════════════════════════════════════════════════════════
-
-export function applyPositionsDirect(
-    els: HTMLElement[],
-    xArr: Float32Array,
-    yArr: Float32Array,
-    count: number
-): void {
-    // No intermediate string allocation — direct property writes
-    // V8 can JIT this to direct memory stores
     for (let i = 0; i < count; i++) {
         els[i]!.style.transform = 'translate3d(' + (xArr[i] | 0) + 'px,' + (yArr[i] | 0) + 'px,0)';
     }
