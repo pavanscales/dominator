@@ -28,15 +28,23 @@ function buildZigWasm(zigDir: string): void {
         const distDir = path.resolve(zigDir, '../dist/zig');
         execSync(`mkdir -p "${distDir}"`, { stdio: 'pipe' });
 
-        // Build core module
+        // Build core module (must match root build:wasm script — freestanding + wasm-ld)
         execSync(
-            `zig build-lib -target wasm32-wasi -fno-entry --name dominator_core "${path.join(zigDir, 'dominator_core.zig')}" -femit-bin="${path.join(distDir, 'dominator_core.wasm')}"`,
+            `zig build-obj -target wasm32-freestanding -fno-entry --name dominator_core "${path.join(zigDir, 'dominator_core.zig')}" -femit-bin="${path.join(distDir, 'dominator_core.o')}"`,
+            { cwd: zigDir, stdio: 'pipe', timeout: 30000 }
+        );
+        execSync(
+            `zig wasm-ld --no-entry --import-memory --export-all "${path.join(distDir, 'dominator_core.o')}" -o "${path.join(distDir, 'dominator_core.wasm')}"`,
             { cwd: zigDir, stdio: 'pipe', timeout: 30000 }
         );
 
-        // Build physics module
+        // Build physics module (same target + linker)
         execSync(
-            `zig build-lib -target wasm32-wasi -fno-entry --name physics "${path.join(zigDir, 'physics.zig')}" -femit-bin="${path.join(distDir, 'physics.wasm')}"`,
+            `zig build-obj -target wasm32-freestanding -fno-entry --name physics "${path.join(zigDir, 'physics.zig')}" -femit-bin="${path.join(distDir, 'physics.o')}"`,
+            { cwd: zigDir, stdio: 'pipe', timeout: 30000 }
+        );
+        execSync(
+            `zig wasm-ld --no-entry --import-memory --export-all "${path.join(distDir, 'physics.o')}" -o "${path.join(distDir, 'physics.wasm')}"`,
             { cwd: zigDir, stdio: 'pipe', timeout: 30000 }
         );
 
