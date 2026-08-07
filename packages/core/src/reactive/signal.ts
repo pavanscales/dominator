@@ -28,16 +28,16 @@ import {
     onViewRefresh,
     reinitWasm,
     _resetStrWriteOffset,
-} from './wasm-glue';
+} from '../wasm/wasm-glue';
 
 import {
     arenaAllocNum,
     TAG_NUMBER, TAG_STRING, TAG_OBJECT,
 } from './arena';
 
-import { drainCmdBuffer, cmdBufferPending, _resetCmdBuffer } from './dom-cmd';
-import { markSignalDirty } from './engine/compute-graph';
-import { logError } from './logging';
+import { drainCmdBuffer, cmdBufferPending, _resetCmdBuffer } from '../dom/dom-cmd';
+import { markSignalDirty } from '../engine/ecs/compute-graph';
+import { logError } from '../logging';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ZIG CORE CONSTANTS — mirror dominator_core.zig memory layout
@@ -104,8 +104,9 @@ function _ensureDirectEff(id: number): void {
     _directEffFirst = nf;
 }
 
+// Inlined for hot path
 function _setDirectEff(sigId: number, effId: number, fn: () => void): void {
-    _ensureDirectEff(sigId);
+    if (sigId >= _directEff.length) _ensureDirectEff(sigId);
     _directEff[sigId] = fn;
     _directEffFirst[sigId] = effId;
 }
@@ -611,19 +612,18 @@ let _signalErrorHandler: ((error: unknown, effectId: number) => void) | null = n
 let _scratchDepth = 0;
 let _scratchPool: Int32Array[] = [new Int32Array(64)];
 
-function _dispatchSignal(sigId: number, seen: Uint32Array, gen: number): void {
-    // Single-subscriber fast path — the direct-effect cache.
-    if (sigId < _directEffFirst.length) {
-        const firstEff = _directEffFirst[sigId];
-        if (firstEff >= 0) {
-            if (seen[firstEff] !== gen) {
-                seen[firstEff] = gen;
-                _runEffectGuarded(firstEff);
-            }
-            return;
-        }
+// Fast dispatch for single subscriber (direct-effect cache)
+// Inlined to avoid function call overhead on hottest path
+function _dispatchDirect(sigId: number, gen: number): void {
+    const firstEff = _directEffFirst[sigId];
+    if (firstEff >= 0 && _batchSeenGen[firstEff] !== gen) {
+        _batchSeenGen[firstEff] = gen;
+        _runEffectGuarded(firstEff);
     }
+}
 
+// Multi-subscriber dispatch with scratch buffer
+function _dispatchMulti(sigId: number, gen: number): void {
     const ptr = _subsPtr[sigId];
     const len = _subsLen[sigId];
     if (ptr < 0 || len === 0) return;
@@ -638,11 +638,12 @@ function _dispatchSignal(sigId: number, seen: Uint32Array, gen: number): void {
     }
     _scratchDepth++;
     try {
-        for (let i = 0; i < len; i++) snap[i] = _subsData[ptr + i];
+        const data = _subsData;
+        for (let i = 0; i < len; i++) snap[i] = data[ptr + i];
         for (let i = 0; i < len; i++) {
             const eid = snap[i];
-            if (eid >= 0 && eid < _effectFns.length && seen[eid] !== gen) {
-                seen[eid] = gen;
+            if (eid >= 0 && _batchSeenGen[eid] !== gen) {
+                _batchSeenGen[eid] = gen;
                 _runEffectGuarded(eid);
             }
         }
@@ -665,19 +666,26 @@ function _runEffectGuarded(id: number): void {
 function _dispatchSet(sigId: number): void {
     if (sigId >= _subsPtr.length) return;
     if (!_dispatchActive) {
-        _batchGen++;
-        const gen = _batchGen;
+        const gen = ++_batchGen;
         _dispatchActive = true;
         try {
-            _dispatchSignal(sigId, _batchSeenGen, gen);
+            // Check direct-effect cache first (fastest path)
+            if (sigId < _directEffFirst.length && _directEffFirst[sigId] >= 0) {
+                _dispatchDirect(sigId, gen);
+            } else {
+                _dispatchMulti(sigId, gen);
+            }
         } finally {
-    _dispatchActive = false;
-    _scratchDepth = 0;
+            _dispatchActive = false;
+            _scratchDepth = 0;
         }
     } else {
-        // Reentrant set during a dispatch — reuse the active generation so the
-        // "seen" table dedups across the whole logical change.
-        _dispatchSignal(sigId, _batchSeenGen, _batchGen);
+        // Reentrant set during a dispatch — reuse the active generation
+        if (sigId < _directEffFirst.length && _directEffFirst[sigId] >= 0) {
+            _dispatchDirect(sigId, _batchGen);
+        } else {
+            _dispatchMulti(sigId, _batchGen);
+        }
     }
 }
 
@@ -700,7 +708,40 @@ function _flushDirty(): void {
         for (let i = 0; i < count; i++) {
             const sigId = list[i];
             if (sigId >= _subsPtr.length) continue;
-            _dispatchSignal(sigId, seen, gen);
+            // Check direct-effect cache first (fastest path)
+            if (sigId < _directEffFirst.length && _directEffFirst[sigId] >= 0) {
+                if (_batchSeenGen[_directEffFirst[sigId]] !== gen) {
+                    _batchSeenGen[_directEffFirst[sigId]] = gen;
+                    _runEffectGuarded(_directEffFirst[sigId]);
+                }
+            } else {
+                const ptr = _subsPtr[sigId];
+                const len = _subsLen[sigId];
+                if (ptr < 0 || len === 0) continue;
+                
+                if (_scratchDepth >= _scratchPool.length) {
+                    _scratchPool.push(new Int32Array(64));
+                }
+                let snap = _scratchPool[_scratchDepth];
+                if (snap.length < len) {
+                    snap = new Int32Array(len * 2);
+                    _scratchPool[_scratchDepth] = snap;
+                }
+                _scratchDepth++;
+                try {
+                    const data = _subsData;
+                    for (let j = 0; j < len; j++) snap[j] = data[ptr + j];
+                    for (let j = 0; j < len; j++) {
+                        const eid = snap[j];
+                        if (eid >= 0 && _batchSeenGen[eid] !== gen) {
+                            _batchSeenGen[eid] = gen;
+                            _runEffectGuarded(eid);
+                        }
+                    }
+                } finally {
+                    _scratchDepth--;
+                }
+            }
         }
     } finally {
         _dispatchActive = false;

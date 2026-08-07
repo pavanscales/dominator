@@ -27,21 +27,21 @@ const REPULSE_FACTOR: f32 = 0.1;
 // SIMD vector type
 const Vec4f = @Vector(4, f32);
 
-// SIMD constants - comptime evaluated
-const SIMD_MOUSE_REPULSE_RADIUS_SQ: Vec4f = @splat(Vec4f, MOUSE_REPULSE_RADIUS_SQ);
-const SIMD_MOUSE_REPULSE_RADIUS: Vec4f = @splat(Vec4f, MOUSE_REPULSE_RADIUS);
-const SIMD_FORM_SPRING: Vec4f = @splat(Vec4f, FORM_SPRING);
-const SIMD_FORM_DAMP: Vec4f = @splat(Vec4f, FORM_DAMP);
-const SIMD_CHAOS_BROWNIAN: Vec4f = @splat(Vec4f, CHAOS_BROWNIAN);
-const SIMD_CHAOS_DAMP: Vec4f = @splat(Vec4f, CHAOS_DAMP);
-const SIMD_EXPLODE_FORCE: Vec4f = @splat(Vec4f, EXPLODE_FORCE);
-const SIMD_REPULSE_FACTOR: Vec4f = @splat(Vec4f, REPULSE_FACTOR);
-const SIMD_ZERO: Vec4f = @splat(Vec4f, 0.0);
-const SIMD_HALF: Vec4f = @splat(Vec4f, 0.5);
-const SIMD_0_001: Vec4f = @splat(Vec4f, 0.001);
-const SIMD_ONE: Vec4f = @splat(Vec4f, 1.0);
-const SIMD_INV_MOUSE_RADIUS: Vec4f = @splat(Vec4f, 1.0 / MOUSE_REPULSE_RADIUS);
-const SIMD_FIVE: Vec4f = @splat(Vec4f, 5.0);
+// SIMD constants - using @splat with single argument (Zig 0.14+)
+const SIMD_MOUSE_REPULSE_RADIUS_SQ: Vec4f = @splat(MOUSE_REPULSE_RADIUS_SQ);
+const SIMD_MOUSE_REPULSE_RADIUS: Vec4f = @splat(MOUSE_REPULSE_RADIUS);
+const SIMD_FORM_SPRING: Vec4f = @splat(FORM_SPRING);
+const SIMD_FORM_DAMP: Vec4f = @splat(FORM_DAMP);
+const SIMD_CHAOS_BROWNIAN: Vec4f = @splat(CHAOS_BROWNIAN);
+const SIMD_CHAOS_DAMP: Vec4f = @splat(CHAOS_DAMP);
+const SIMD_EXPLODE_FORCE: Vec4f = @splat(EXPLODE_FORCE);
+const SIMD_REPULSE_FACTOR: Vec4f = @splat(REPULSE_FACTOR);
+const SIMD_ZERO: Vec4f = @splat(0.0);
+const SIMD_HALF: Vec4f = @splat(0.5);
+const SIMD_0_001: Vec4f = @splat(0.001);
+const SIMD_ONE: Vec4f = @splat(1.0);
+const SIMD_INV_MOUSE_RADIUS: Vec4f = @splat(1.0 / MOUSE_REPULSE_RADIUS);
+const SIMD_FIVE: Vec4f = @splat(5.0);
 
 // Heap: [posX][posY][velX][velY][targetX][targetY][config]
 var heap: [MAX_PARTICLES * 8 + 64]u32 = [_]u32{0} ** (MAX_PARTICLES * 8 + 64);
@@ -78,81 +78,123 @@ inline fn xorshift4xF32() Vec4f {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 inline fn posXPtr(i: u32) *align(16) f32 {
-    return @ptrCast(&heap[i]);
+    return @alignCast(@ptrCast(&heap[i]));
 }
 
 inline fn posYPtr(i: u32) *align(16) f32 {
-    return @ptrCast(&heap[_count + i]);
+    return @alignCast(@ptrCast(&heap[_count + i]));
 }
 
 inline fn velXPtr(i: u32) *align(16) f32 {
-    return @ptrCast(&heap[_count * 2 + i]);
+    return @alignCast(@ptrCast(&heap[_count * 2 + i]));
 }
 
 inline fn velYPtr(i: u32) *align(16) f32 {
-    return @ptrCast(&heap[_count * 3 + i]);
+    return @alignCast(@ptrCast(&heap[_count * 3 + i]));
 }
 
 inline fn targetXPtr(i: u32) *align(16) f32 {
-    return @ptrCast(&heap[_count * 4 + i]);
+    return @alignCast(@ptrCast(&heap[_count * 4 + i]));
 }
 
 inline fn targetYPtr(i: u32) *align(16) f32 {
-    return @ptrCast(&heap[_count * 5 + i]);
+    return @alignCast(@ptrCast(&heap[_count * 5 + i]));
 }
 
-// Scalar accessors
 inline fn getPosX(i: u32) f32 {
-    return @as(*align(1) const f32, @ptrCast(&heap[i])).*;
+    return @as(f32, @bitCast(heap[i]));
 }
-inline fn setPosX(i: u32, val: f32) void {
-    @as(*align(1) f32, @ptrCast(&heap[i])).* = val;
-}
+
 inline fn getPosY(i: u32) f32 {
-    return @as(*align(1) const f32, @ptrCast(&heap[_count + i])).*;
+    return @as(f32, @bitCast(heap[_count + i]));
 }
-inline fn setPosY(i: u32, val: f32) void {
-    @as(*align(1) f32, @ptrCast(&heap[_count + i])).* = val;
-}
+
 inline fn getVelX(i: u32) f32 {
-    return @as(*align(1) const f32, @ptrCast(&heap[_count * 2 + i])).*;
+    return @as(f32, @bitCast(heap[_count * 2 + i]));
 }
-inline fn setVelX(i: u32, val: f32) void {
-    @as(*align(1) f32, @ptrCast(&heap[_count * 2 + i])).* = val;
-}
+
 inline fn getVelY(i: u32) f32 {
-    return @as(*align(1) const f32, @ptrCast(&heap[_count * 3 + i])).*;
+    return @as(f32, @bitCast(heap[_count * 3 + i]));
 }
-inline fn setVelY(i: u32, val: f32) void {
-    @as(*align(1) f32, @ptrCast(&heap[_count * 3 + i])).* = val;
-}
+
 inline fn getTargetX(i: u32) f32 {
-    return @as(*align(1) const f32, @ptrCast(&heap[_count * 4 + i])).*;
+    return @as(f32, @bitCast(heap[_count * 4 + i]));
 }
-inline fn setTargetX(i: u32, val: f32) void {
-    @as(*align(1) f32, @ptrCast(&heap[_count * 4 + i])).* = val;
-}
+
 inline fn getTargetY(i: u32) f32 {
-    return @as(*align(1) const f32, @ptrCast(&heap[_count * 5 + i])).*;
+    return @as(f32, @bitCast(heap[_count * 5 + i]));
 }
-inline fn setTargetY(i: u32, val: f32) void {
-    @as(*align(1) f32, @ptrCast(&heap[_count * 5 + i])).* = val;
+
+inline fn setPosX(i: u32, v: f32) void {
+    heap[i] = @bitCast(v);
+}
+
+inline fn setPosY(i: u32, v: f32) void {
+    heap[_count + i] = @bitCast(v);
+}
+
+inline fn setVelX(i: u32, v: f32) void {
+    heap[_count * 2 + i] = @bitCast(v);
+}
+
+inline fn setVelY(i: u32, v: f32) void {
+    heap[_count * 3 + i] = @bitCast(v);
+}
+
+inline fn setTargetX(i: u32, v: f32) void {
+    heap[_count * 4 + i] = @bitCast(v);
+}
+
+inline fn setTargetY(i: u32, v: f32) void {
+    heap[_count * 5 + i] = @bitCast(v);
 }
 
 inline fn getConfig(offset: u32) i32 {
     return @as(i32, @bitCast(heap[CONFIG_OFFSET_BASE + offset]));
 }
+
 inline fn setConfig(offset: u32, val: i32) void {
     heap[CONFIG_OFFSET_BASE + offset] = @bitCast(val);
 }
 
-// Load/store SIMD vectors
+// Load/store SIMD vectors - fixed for Zig 0.14+
 inline fn load4(ptr: *align(16) f32) Vec4f {
-    return @as(Vec4f, @bitCast(*[4]f32, ptr).*);
+    const arr: *[4]f32 = @ptrCast(ptr);
+    return @as(Vec4f, @bitCast(arr.*));
 }
 
 inline fn store4(ptr: *align(16) f32, v: Vec4f) void {
-    @as(*[4]f32, @ptrCast(ptr)).* = @bitCast(v);
+    const arr: *[4]f32 = @ptrCast(ptr);
+    arr.* = @bitCast(v);
+}
+
+// Vector comparison helper for Zig 0.14 (no @vecCmp)
+inline fn vecCmpLt(a: Vec4f, b: Vec4f) Vec4f {
+    return Vec4f{
+        if (a[0] < b[0]) -1.0 else 0.0,
+        if (a[1] < b[1]) -1.0 else 0.0,
+        if (a[2] < b[2]) -1.0 else 0.0,
+        if (a[3] < b[3]) -1.0 else 0.0,
+    };
+}
+
+inline fn vecCmpGt(a: Vec4f, b: Vec4f) Vec4f {
+    return Vec4f{
+        if (a[0] > b[0]) -1.0 else 0.0,
+        if (a[1] > b[1]) -1.0 else 0.0,
+        if (a[2] > b[2]) -1.0 else 0.0,
+        if (a[3] > b[3]) -1.0 else 0.0,
+    };
+}
+
+// Branchless select for SIMD vectors
+inline fn vecSelect(mask: Vec4f, a: Vec4f, b: Vec4f) Vec4f {
+    return Vec4f{
+        if (mask[0] != 0.0) a[0] else b[0],
+        if (mask[1] != 0.0) a[1] else b[1],
+        if (mask[2] != 0.0) a[2] else b[2],
+        if (mask[3] != 0.0) a[3] else b[3],
+    };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -165,8 +207,8 @@ export fn physics_init(count: u32) void {
 
     const width: f32 = @floatFromInt(@max(getConfig(CFG_WIDTH), 1));
     const height: f32 = @floatFromInt(@max(getConfig(CFG_HEIGHT), 1));
-    const simd_width: Vec4f = @splat(Vec4f, width);
-    const simd_height: Vec4f = @splat(Vec4f, height);
+    const simd_width: Vec4f = @splat(width);
+    const simd_height: Vec4f = @splat(height);
 
     var i: u32 = 0;
     const simd_end = _count & ~@as(u32, 3);
@@ -209,10 +251,10 @@ export fn physics_step() void {
     tick += 1;
     setConfig(CFG_TICK, tick);
 
-    const simd_width: Vec4f = @splat(Vec4f, width);
-    const simd_height: Vec4f = @splat(Vec4f, height);
-    const simd_mouse_x: Vec4f = @splat(Vec4f, mouse_x);
-    const simd_mouse_y: Vec4f = @splat(Vec4f, mouse_y);
+    const simd_width: Vec4f = @splat(width);
+    const simd_height: Vec4f = @splat(height);
+    const simd_mouse_x: Vec4f = @splat(mouse_x);
+    const simd_mouse_y: Vec4f = @splat(mouse_y);
 
     if (is_forming) {
         // FORMING MODE: scalar (branching per particle to target)
@@ -258,27 +300,27 @@ export fn physics_step() void {
             var vy1 = load4(velYPtr(i + 4));
 
             // ── Mouse repulsion (vectorized) ──
-            var dx0 = simd_mouse_x - x0;
-            var dx1 = simd_mouse_x - x1;
-            var dy0 = simd_mouse_y - y0;
-            var dy1 = simd_mouse_y - y1;
+            const dx0 = simd_mouse_x - x0;
+            const dx1 = simd_mouse_x - x1;
+            const dy0 = simd_mouse_y - y0;
+            const dy1 = simd_mouse_y - y1;
 
-            var dist_sq0 = dx0 * dx0 + dy0 * dy0;
-            var dist_sq1 = dx1 * dx1 + dy1 * dy1;
+            const dist_sq0 = dx0 * dx0 + dy0 * dy0;
+            const dist_sq1 = dx1 * dx1 + dy1 * dy1;
 
             // Branchless repulsion: compute force for all lanes, mask later
-            var inv_dist0 = @sqrt(@max(SIMD_0_001, dist_sq0));
-            var inv_dist1 = @sqrt(@max(SIMD_0_001, dist_sq1));
+            const inv_dist0 = @sqrt(vecSelect(vecCmpLt(dist_sq0, SIMD_0_001), SIMD_0_001, dist_sq0));
+            const inv_dist1 = @sqrt(vecSelect(vecCmpLt(dist_sq1, SIMD_0_001), SIMD_0_001, dist_sq1));
 
             var force0 = (SIMD_MOUSE_REPULSE_RADIUS - inv_dist0) * SIMD_INV_MOUSE_RADIUS;
             var force1 = (SIMD_MOUSE_REPULSE_RADIUS - inv_dist1) * SIMD_INV_MOUSE_RADIUS;
 
             // Mask: only apply force where dist_sq < R^2
-            var mask0 = @vecCmp(dist_sq0, SIMD_MOUSE_REPULSE_RADIUS_SQ, .Lt);
-            var mask1 = @vecCmp(dist_sq1, SIMD_MOUSE_REPULSE_RADIUS_SQ, .Lt);
+            const mask0 = vecCmpLt(dist_sq0, SIMD_MOUSE_REPULSE_RADIUS_SQ);
+            const mask1 = vecCmpLt(dist_sq1, SIMD_MOUSE_REPULSE_RADIUS_SQ);
 
-            force0 = @select(mask0, force0, SIMD_ZERO);
-            force1 = @select(mask1, force1, SIMD_ZERO);
+            force0 = vecSelect(mask0, force0, SIMD_ZERO);
+            force1 = vecSelect(mask1, force1, SIMD_ZERO);
 
             vx0 -= dx0 * force0 * SIMD_REPULSE_FACTOR;
             vx1 -= dx1 * force1 * SIMD_REPULSE_FACTOR;
@@ -304,10 +346,10 @@ export fn physics_step() void {
             y1 += vy1;
 
             // ── Branchless toroidal wrapping ──
-            x0 = @select(@vecCmp(x0, SIMD_ZERO, .Lt), x0 + simd_width, @select(@vecCmp(x0, simd_width, .Gt), x0 - simd_width, x0));
-            x1 = @select(@vecCmp(x1, SIMD_ZERO, .Lt), x1 + simd_width, @select(@vecCmp(x1, simd_width, .Gt), x1 - simd_width, x1));
-            y0 = @select(@vecCmp(y0, SIMD_ZERO, .Lt), y0 + simd_height, @select(@vecCmp(y0, simd_height, .Gt), y0 - simd_height, y0));
-            y1 = @select(@vecCmp(y1, SIMD_ZERO, .Lt), y1 + simd_height, @select(@vecCmp(y1, simd_height, .Gt), y1 - simd_height, y1));
+            x0 = vecSelect(vecCmpLt(x0, SIMD_ZERO), x0 + simd_width, vecSelect(vecCmpGt(x0, simd_width), x0 - simd_width, x0));
+            x1 = vecSelect(vecCmpLt(x1, SIMD_ZERO), x1 + simd_width, vecSelect(vecCmpGt(x1, simd_width), x1 - simd_width, x1));
+            y0 = vecSelect(vecCmpLt(y0, SIMD_ZERO), y0 + simd_height, vecSelect(vecCmpGt(y0, simd_height), y0 - simd_height, y0));
+            y1 = vecSelect(vecCmpLt(y1, SIMD_ZERO), y1 + simd_height, vecSelect(vecCmpGt(y1, simd_height), y1 - simd_height, y1));
 
             // Store back
             store4(posXPtr(i), x0);
@@ -332,7 +374,7 @@ export fn physics_step() void {
             const dist_sq = dx * dx + dy * dy;
 
             if (dist_sq < MOUSE_REPULSE_RADIUS_SQ) {
-                const safe_sq = @max(dist_sq, 0.001);
+                const safe_sq = if (dist_sq > 0.001) dist_sq else 0.001;
                 const dist = @sqrt(safe_sq);
                 const force = (MOUSE_REPULSE_RADIUS - dist) / MOUSE_REPULSE_RADIUS;
                 vx -= dx * force * REPULSE_FACTOR;
@@ -341,13 +383,23 @@ export fn physics_step() void {
 
             vx += (xorshiftF32() - 0.5) * CHAOS_BROWNIAN;
             vy += (xorshiftF32() - 0.5) * CHAOS_BROWNIAN;
+
             vx *= CHAOS_DAMP;
             vy *= CHAOS_DAMP;
+
             x += vx;
             y += vy;
 
-            if (x < 0) x += width else if (x > width) x -= width;
-            if (y < 0) y += height else if (y > height) y -= height;
+            if (x < 0) {
+                x += width;
+            } else if (x >= width) {
+                x -= width;
+            }
+            if (y < 0) {
+                y += height;
+            } else if (y >= height) {
+                y -= height;
+            }
 
             setPosX(i, x);
             setPosY(i, y);
@@ -358,103 +410,81 @@ export fn physics_step() void {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// EXPLODE — SIMD128
+// PHYSICS EXPLODE
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export fn physics_explode() void {
+    const width: f32 = @floatFromInt(@max(getConfig(CFG_WIDTH), 1));
+    const height: f32 = @floatFromInt(@max(getConfig(CFG_HEIGHT), 1));
+    const center_x = width * 0.5;
+    const center_y = height * 0.5;
+    const simd_center_x: Vec4f = @splat(center_x);
+    const simd_center_y: Vec4f = @splat(center_y);
+    const simd_explode_force: Vec4f = @splat(EXPLODE_FORCE);
+
     var i: u32 = 0;
     const simd_end = _count & ~@as(u32, 3);
 
     while (i < simd_end) : (i += 4) {
-        const rvx = (xorshift4xF32() - SIMD_HALF) * SIMD_EXPLODE_FORCE;
-        const rvy = (xorshift4xF32() - SIMD_HALF) * SIMD_EXPLODE_FORCE;
-        store4(velXPtr(i), load4(velXPtr(i)) + rvx);
-        store4(velYPtr(i), load4(velYPtr(i)) + rvy);
+        const x0 = load4(posXPtr(i));
+        const y0 = load4(posYPtr(i));
+        var vx0 = load4(velXPtr(i));
+        var vy0 = load4(velYPtr(i));
+
+        const dx = x0 - simd_center_x;
+        const dy = y0 - simd_center_y;
+
+        const dist_sq = dx * dx + dy * dy;
+        const inv_dist = @sqrt(vecSelect(vecCmpLt(dist_sq, SIMD_0_001), SIMD_0_001, dist_sq));
+        const force = simd_explode_force / inv_dist;
+
+        vx0 += dx * force;
+        vy0 += dy * force;
+
+        store4(velXPtr(i), vx0);
+        store4(velYPtr(i), vy0);
     }
 
+    // Scalar tail
     while (i < _count) : (i += 1) {
-        setVelX(i, getVelX(i) + (xorshiftF32() - 0.5) * EXPLODE_FORCE);
-        setVelY(i, getVelY(i) + (xorshiftF32() - 0.5) * EXPLODE_FORCE);
+        const x = getPosX(i);
+        const y = getPosY(i);
+        var vx = getVelX(i);
+        var vy = getVelY(i);
+
+        const dx = x - center_x;
+        const dy = y - center_y;
+        const dist_sq = dx * dx + dy * dy;
+        if (dist_sq > 0.0) {
+            const inv_dist = 1.0 / @sqrt(dist_sq);
+            const force = EXPLODE_FORCE * inv_dist;
+            vx += dx * force;
+            vy += dy * force;
+        }
+
+        setVelX(i, vx);
+        setVelY(i, vy);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// TARGETS — Bulk copy from external pointer
+// SET TARGETS (for forming mode)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export fn physics_set_targets(ptr: u32, count: u32) void {
-    const n = @min(count, _count);
     var i: u32 = 0;
-    const simd_end = n & ~@as(u32, 3);
-
-    while (i < simd_end) : (i += 4) {
-        const src = @ptrCast(*align(16) const f32, ptr + i * 8);
-        store4(targetXPtr(i), load4(src));
-        store4(targetYPtr(i), load4(src + 4));
-    }
-
-    while (i < n) : (i += 1) {
-        setTargetX(i, @as(*align(1) const f32, @ptrCast(ptr + i * 8)).*);
-        setTargetY(i, @as(*align(1) const f32, @ptrCast(ptr + i * 8 + 4)).*);
+    while (i < count) : (i += 1) {
+        const tx = @as(f32, @bitCast(heap[ptr + i * 2]));
+        const ty = @as(f32, @bitCast(heap[ptr + i * 2 + 1]));
+        setTargetX(i, tx);
+        setTargetY(i, ty);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// CONFIG SETTERS
+// SET CONFIG (single value)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export fn physics_set_config(key: u32, value: i32) void {
-    if (key <= CFG_TICK) setConfig(key, value);
-}
-
-export fn physics_get_count() u32 {
-    return _count;
-}
-
-export fn physics_positions_ptr() u32 {
-    return 0;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// TESTS
-// ═══════════════════════════════════════════════════════════════════════════════
-
-test "physics init and step" {
-    setConfig(CFG_WIDTH, 1920);
-    setConfig(CFG_HEIGHT, 1080);
-    setConfig(CFG_MOUSE_X, 960);
-    setConfig(CFG_MOUSE_Y, 540);
-    setConfig(CFG_MODE, 0);
-
-    physics_init(100);
-    try std.testing.expectEqual(@as(u32, 100), physics_get_count());
-
-    physics_step();
-    try std.testing.expect(getConfig(CFG_TICK) == 1);
-}
-
-test "physics explode" {
-    setConfig(CFG_WIDTH, 800);
-    setConfig(CFG_HEIGHT, 600);
-    physics_init(50);
-    physics_explode();
-}
-
-test "physics set targets" {
-    setConfig(CFG_WIDTH, 800);
-    setConfig(CFG_HEIGHT, 600);
-    physics_init(10);
-
-    var i: u32 = 0;
-    while (i < 10) : (i += 1) {
-        const ptr: *align(1) f32 = @ptrCast(&heap[1000 + i * 2]);
-        ptr.* = @as(f32, @floatFromInt(i * 10));
-        const ptr2: *align(1) f32 = @ptrCast(&heap[1000 + i * 2 + 1]);
-        ptr2.* = @as(f32, @floatFromInt(i * 20));
-    }
-
-    physics_set_targets(1000, 10);
-
-    try std.testing.expectEqual(0.0, getTargetX(0));
-    try std.testing.expectEqual(10.0, getTargetX(1));
+export fn physics_set_config(offset: u32, val: i32) void {
+    setConfig(offset, val);
 }

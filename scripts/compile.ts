@@ -70,6 +70,8 @@ const buildZigWasm = () => {
 const inputFile = process.argv[2];
 const outputFile = process.argv[3];
 const functionName = process.argv[4];
+const aggressive = process.argv.includes('--aggressive');
+const noDestruct = process.argv.includes('--no-destructuring');
 
 // Check for --build-wasm flag
 if (process.argv.includes('--build-wasm')) {
@@ -81,7 +83,21 @@ if (inputFile && outputFile) {
     const outputPath = path.isAbsolute(outputFile) ? outputFile : path.join(process.cwd(), outputFile);
 
     if (fs.existsSync(inputPath)) {
-        compile(inputPath, outputPath, functionName);
+        if (noDestruct) {
+            const opts = { aggressive, suppressDestructuring: true };
+            if (functionName) opts.functionName = functionName;
+            const template = fs.readFileSync(inputPath, 'utf-8');
+            const ast = parse(template);
+            const instructions = ssa(ast);
+            const optimized = optimize(instructions);
+            const code = codegen(optimized, opts);
+            const dir = path.dirname(outputPath);
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(outputPath, code);
+            console.log(`Compiled ${inputPath} -> ${outputPath}`);
+        } else {
+            compile(inputPath, outputPath, functionName);
+        }
     } else {
         console.error(`Template not found: ${inputPath}`);
     }

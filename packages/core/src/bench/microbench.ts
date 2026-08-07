@@ -1,229 +1,195 @@
-import { now, elapsedNs, calibrate, getOverhead, toMs, formatOps, getClockName } from './measurement';
-
-export interface BenchConfig {
-    warmupMs: number;
-    measureMs: number;
-    maxSamples: number;
-    batchSize: number;
-    autoBatch: boolean;
-    detectGC: boolean;
-    gcThresholdSigma: number;
-}
-
-export interface BenchStats {
+export interface BenchResult {
     label: string;
-    n: number;
-    totalNs: number;
-    meanNs: number;
     medianNs: number;
-    minNs: number;
-    maxNs: number;
-    p25Ns: number;
-    p75Ns: number;
+    meanNs: number;
     p95Ns: number;
     p99Ns: number;
-    p999Ns: number;
-    stddevNs: number;
-    cv: number;
     opsPerSec: number;
-    overheadNs: number;
-    gcPauses: number;
-    outlierCount: number;
-    batchSize: number;
-    warmupMs: number;
-    measureMs: number;
+    cv: number;
+    gcCount: number;
+    samples: number;
 }
 
-export type ScaleResult = Map<number, BenchStats>;
+export interface BenchOptions {
+    warmupMs?: number;
+    measureMs?: number;
+    minSamples?: number;
+    maxSamples?: number;
+}
 
-const DEFAULT_CONFIG: BenchConfig = {
-    warmupMs: 100,
-    measureMs: 500,
-    maxSamples: 100_000,
-    batchSize: 0,
-    autoBatch: true,
-    detectGC: true,
-    gcThresholdSigma: 5,
-};
+export interface CompareResult {
+    labelA: string;
+    labelB: string;
+    medianA: number;
+    medianB: number;
+    ratio: number;
+    faster: 'A' | 'B';
+    overheadNs: number;
+}
 
-export function bench(
-    label: string,
-    fn: () => void,
-    config?: Partial<BenchConfig>
-): BenchStats {
-    const cfg = { ...DEFAULT_CONFIG, ...config };
-    const oh = calibrate(10000);
+const CALIBRATION_OVERHEAD_NS = 100;
 
-    const probeStart = now();
-    // Bounded probe: time-boxed instead of a fixed 10k iterations so a slow op
-    // (e.g. a set() fanning out to 10K effects) cannot run for minutes.
-    const probeDeadline = Number(probeStart) + 10_000_000; // 10ms in ns
-    let probeCount = 0;
-    while (Number(now()) < probeDeadline) { fn(); probeCount++; }
-    if (probeCount === 0) probeCount = 1;
-    const probeNs = elapsedNs(probeStart);
-    const estimateNs = probeNs / probeCount;
+let _calibrationDone = false;
+let _calibratedOverhead = CALIBRATION_OVERHEAD_NS;
 
-    const useBatch = cfg.autoBatch && (estimateNs < oh * 2 || cfg.batchSize > 0);
-    let batchSize = cfg.batchSize;
-    if (useBatch && batchSize === 0) {
-        batchSize = Math.max(100, Math.min(10000, Math.ceil(oh * 10 / estimateNs)));
+function calibrate(): number {
+    if (_calibrationDone) return _calibratedOverhead;
+    
+    const ITER = 1_000_000;
+    const start = performance.now();
+    let x = 0;
+    for (let i = 0; i < ITER; i++) x++;
+    const elapsed = performance.now() - start;
+    const perIter = (elapsed * 1_000_000) / ITER;
+    _calibratedOverhead = Math.max(0, perIter - 2);
+    _calibrationDone = true;
+    return _calibratedOverhead;
+}
+
+function getOverhead(): number {
+    return _calibratedOverhead;
+}
+
+function hrtimeNow(): bigint {
+    return process.hrtime.bigint();
+}
+
+function hrtimeDiffNs(start: bigint, end: bigint): number {
+    return Number(end - start) / 1_000_000;
+}
+
+function gc(): void {
+    if (global.gc) global.gc();
+}
+
+export function bench(label: string, fn: () => void, opts: BenchOptions = {}): BenchResult {
+    const {
+        warmupMs = 100,
+        measureMs = 500,
+        minSamples = 1000,
+        maxSamples = 100_000,
+    } = opts;
+
+    calibrate();
+    const overhead = getOverhead();
+
+    gc();
+
+    const warmupStart = hrtimeNow();
+    let warmupCount = 0;
+    while (hrtimeDiffNs(warmupStart, hrtimeNow()) < warmupMs) {
+        fn();
+        warmupCount++;
     }
 
-    const warmupDeadline = Number(now()) + cfg.warmupMs * 1_000_000;
-    while (Number(now()) < warmupDeadline) fn();
-
-    const measDeadline = Number(now()) + cfg.measureMs * 1_000_000;
-    const rawSamples = new Float64Array(cfg.maxSamples);
-    let count = 0;
-
-    if (useBatch) {
-        while (Number(now()) < measDeadline && count < cfg.maxSamples) {
-            const t0 = now();
-            for (let b = 0; b < batchSize; b++) fn();
-            let delta = elapsedNs(t0);
-            delta = delta > oh ? delta - oh : 0;
-            rawSamples[count++] = delta / batchSize;
-        }
-    } else {
-        while (Number(now()) < measDeadline && count < cfg.maxSamples) {
-            const t0 = now();
-            fn();
-            let delta = elapsedNs(t0);
-            delta = delta > oh ? delta - oh : 0;
-            rawSamples[count++] = delta;
-        }
+    const samples: number[] = [];
+    let gcBefore = 0;
+    let gcAfter = 0;
+    
+    if (global.gc) {
+        const before = (global as any)._gcCount || 0;
+        gcBefore = before;
     }
 
-    if (count === 0) {
+    const measureStart = hrtimeNow();
+    let iterations = 0;
+    
+    while (samples.length < minSamples && hrtimeDiffNs(measureStart, hrtimeNow()) < measureMs && samples.length < maxSamples) {
+        const s = hrtimeNow();
+        fn();
+        const e = hrtimeNow();
+        const ns = hrtimeDiffNs(s, e) - overhead;
+        if (ns > 0) samples.push(ns);
+        iterations++;
+    }
+
+    if (global.gc) {
+        const after = (global as any)._gcCount || 0;
+        gcAfter = after;
+    }
+
+    if (samples.length === 0) {
         return {
-            label, n: 0, totalNs: 0,
-            meanNs: 0, medianNs: 0, minNs: 0, maxNs: 0,
-            p25Ns: 0, p75Ns: 0, p95Ns: 0, p99Ns: 0, p999Ns: 0,
-            stddevNs: 0, cv: 0, opsPerSec: 0,
-            overheadNs: oh, gcPauses: 0, outlierCount: 0,
-            batchSize, warmupMs: cfg.warmupMs, measureMs: cfg.measureMs,
+            label,
+            medianNs: 0,
+            meanNs: 0,
+            p95Ns: 0,
+            p99Ns: 0,
+            opsPerSec: 0,
+            cv: 0,
+            gcCount: gcAfter - gcBefore,
+            samples: 0,
         };
     }
 
-    const data = rawSamples.subarray(0, count);
-    data.sort();
-
-    const n = data.length;
-    const minNs = data[0];
-    const maxNs = data[n - 1];
-    const medianNs = n % 2 === 0
-        ? (data[n / 2 - 1] + data[n / 2]) / 2
-        : data[Math.floor(n / 2)];
-    const p25Ns = percentile(data, 25);
-    const p75Ns = percentile(data, 75);
-    const p95Ns = percentile(data, 95);
-    const p99Ns = percentile(data, 99);
-    const p999Ns = percentile(data, 99.9);
-
-    let sum = 0;
-    for (let i = 0; i < n; i++) sum += data[i];
-    const meanNs = sum / n;
-
-    let variance = 0;
-    for (let i = 0; i < n; i++) {
-        const d = data[i] - meanNs;
-        variance += d * d;
-    }
-    const stddevNs = Math.sqrt(variance / n);
-    const cv = meanNs > 0 ? stddevNs / meanNs : 0;
-
-    let gcPauses = 0;
-    let outlierCount = 0;
-    if (cfg.detectGC && meanNs > 0) {
-        const gcThreshold = meanNs + cfg.gcThresholdSigma * stddevNs;
-        const gcRunCost = meanNs * 50;
-        for (let i = 0; i < n; i++) {
-            if (data[i] > gcThreshold) outlierCount++;
-            if (data[i] > gcRunCost) gcPauses++;
-        }
-    }
-
-    const totalNs = sum;
-    const avgNsPerOp = totalNs / n;
-    const opsPerSec = avgNsPerOp > 0 ? 1e9 / avgNsPerOp : 0;
+    samples.sort((a, b) => a - b);
+    
+    const medianNs = samples[Math.floor(samples.length * 0.5)];
+    const p95Ns = samples[Math.floor(samples.length * 0.95)];
+    const p99Ns = samples[Math.floor(samples.length * 0.99)];
+    const sum = samples.reduce((a, b) => a + b, 0);
+    const meanNs = sum / samples.length;
+    const variance = samples.reduce((a, b) => a + (b - meanNs) ** 2, 0) / samples.length;
+    const stdDev = Math.sqrt(variance);
+    const cv = meanNs > 0 ? (stdDev / meanNs) * 100 : 0;
+    const totalMs = hrtimeDiffNs(measureStart, hrtimeNow());
+    const opsPerSec = (samples.length / totalMs) * 1000;
 
     return {
-        label, n, totalNs,
-        meanNs, medianNs, minNs, maxNs,
-        p25Ns, p75Ns, p95Ns, p99Ns, p999Ns,
-        stddevNs, cv, opsPerSec,
-        overheadNs: oh, gcPauses, outlierCount,
-        batchSize, warmupMs: cfg.warmupMs, measureMs: cfg.measureMs,
+        label,
+        medianNs,
+        meanNs,
+        p95Ns,
+        p99Ns,
+        opsPerSec,
+        cv,
+        gcCount: gcAfter - gcBefore,
+        samples: samples.length,
     };
 }
 
-function percentile(sorted: Float64Array, p: number): number {
-    const idx = Math.ceil(sorted.length * p / 100) - 1;
-    return sorted[Math.max(0, idx)];
+// ═══════════════════════════════════════════════════════════════════════════
+// SCALE SWEEP — benchmark a workload at multiple problem sizes
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type BenchConfig = BenchOptions;
+
+export interface BenchStats {
+    medianNs: number;
+    meanNs: number;
+    p95Ns: number;
+    p99Ns: number;
+    opsPerSec: number;
+    samples: number;
+}
+
+export interface ScaleResult {
+    scale: number;
+    medianNs: number;
+    p95Ns: number;
+    opsPerSec: number;
+    samples: number;
 }
 
 export function benchScale(
     label: string,
-    factory: (n: number) => () => void,
-    scales: number[] = [100, 1_000, 10_000, 100_000],
-    config?: Partial<BenchConfig>
-): ScaleResult {
-    const results: ScaleResult = new Map();
+    fn: (n: number) => void,
+    scales: number[],
+    opts: BenchOptions = {},
+): ScaleResult[] {
+    const out: ScaleResult[] = [];
     for (const n of scales) {
-        const fn = factory(n);
-        const r = bench(`${label} [N=${n.toLocaleString()}]`, fn, config);
-        results.set(n, r);
+        const r = bench(`${label} n=${n.toLocaleString()}`, () => fn(n), opts);
+        out.push({ scale: n, medianNs: r.medianNs, p95Ns: r.p95Ns, opsPerSec: r.opsPerSec, samples: r.samples });
     }
-    return results;
+    return out;
 }
 
-export function report(stats: BenchStats[]): void {
-    const lines: string[] = [];
-    lines.push('');
-    lines.push('═'.repeat(140));
-    lines.push(' MICROBENCH RESULTS');
-    lines.push('═'.repeat(140));
-    lines.push(
-        '│ ' + 'Benchmark'.padEnd(50) +
-        '│ Median'.padStart(12) +
-        '│ Mean'.padStart(12) +
-        '│ P95'.padStart(12) +
-        '│ P99'.padStart(12) +
-        '│ Ops/s'.padStart(14) +
-        '│ σ/μ'.padStart(8) +
-        '│ GC'.padStart(6) +
-        ' │'
-    );
-    lines.push('├' + '─'.repeat(52) + '┼' + '─'.repeat(14) + '┼' + '─'.repeat(14) + '┼' + '─'.repeat(14) + '┼' + '─'.repeat(14) + '┼' + '─'.repeat(16) + '┼' + '─'.repeat(10) + '┼' + '─'.repeat(8) + '┤');
-
-    for (const s of stats) {
-        lines.push(
-            '│ ' + s.label.padEnd(50) +
-            '│ ' + toMs(s.medianNs).padStart(10) +
-            '│ ' + toMs(s.meanNs).padStart(10) +
-            '│ ' + toMs(s.p95Ns).padStart(10) +
-            '│ ' + toMs(s.p99Ns).padStart(10) +
-            '│ ' + formatOps(s.opsPerSec).padStart(12) +
-            '│ ' + (isFinite(s.cv) ? (s.cv * 100).toFixed(1) : '?').padStart(4) + '%' +
-            '│ ' + (s.gcPauses > 0 ? s.gcPauses.toString() : '').padStart(4) +
-            ' │'
-        );
+export function reportScale(results: ScaleResult[]): void {
+    console.log('\n── SCALE SWEEP ──');
+    for (const r of results) {
+        console.log(`  n=${r.scale.toLocaleString().padEnd(12)} ${formatNs(r.medianNs).padStart(12)} median  ${r.opsPerSec.toLocaleString(undefined, { maximumFractionDigits: 0 }).padStart(12)} ops/s`);
     }
-    lines.push('└' + '─'.repeat(52) + '┴' + '─'.repeat(14) + '┴' + '─'.repeat(14) + '┴' + '─'.repeat(14) + '┴' + '─'.repeat(14) + '┴' + '─'.repeat(16) + '┴' + '─'.repeat(10) + '┴' + '─'.repeat(8) + '┘');
-    lines.push(`  Clock: ${getClockName()}  Overhead: ${getOverhead().toFixed(0)} ns  Batch: ${stats[0]?.batchSize ?? 'individual'}`);
-    lines.push('');
-    console.log(lines.join('\n'));
-}
-
-export function reportScale(results: ScaleResult, header?: string): void {
-    const stats = Array.from(results.entries())
-        .sort(([a], [b]) => a - b)
-        .map(([_, s]) => s);
-    if (header) {
-        console.log(`\n── ${header} ──`);
-    }
-    report(stats);
 }
 
 export function compare(
@@ -231,21 +197,227 @@ export function compare(
     fnA: () => void,
     labelB: string,
     fnB: () => void,
-    config?: Partial<BenchConfig>
-): { a: BenchStats; b: BenchStats; ratio: number } {
-    const cfg = { ...DEFAULT_CONFIG, ...config };
-    const oh = calibrate(10000);
+    opts: BenchOptions = {}
+): CompareResult {
+    const rA = bench(labelA, fnA, opts);
+    const rB = bench(labelB, fnB, opts);
+    
+    const ratio = rA.medianNs > 0 ? rB.medianNs / rA.medianNs : 0;
+    const faster = rA.medianNs < rB.medianNs ? 'A' : 'B';
+    const overheadNs = getOverhead();
 
-    const a = bench(labelA, fnA, cfg);
-    const b = bench(labelB, fnB, cfg);
+    return {
+        labelA,
+        labelB,
+        medianA: rA.medianNs,
+        medianB: rB.medianNs,
+        ratio,
+        faster,
+        overheadNs,
+    };
+}
 
-    const ratio = a.medianNs > 0 ? b.medianNs / a.medianNs : b.opsPerSec / a.opsPerSec;
+export function report(results: BenchResult[]): void {
+    console.log('\n═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════');
+    console.log(' MICROBENCH RESULTS');
+    console.log('═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════');
+    console.log('│ Benchmark                                             │ Median      │ Mean       │ P95       │ P99       │ Ops/s       │ σ/μ   │ GC │');
+    console.log('├────────────────────────────────────────────────────┼──────────────┼──────────────┼──────────────┼──────────────┼────────────────┼──────────┼────────┤');
+    
+    for (const r of results) {
+        const label = r.label.padEnd(52);
+        const median = formatNs(r.medianNs).padStart(12);
+        const mean = formatNs(r.meanNs).padStart(12);
+        const p95 = formatNs(r.p95Ns).padStart(12);
+        const p99 = formatNs(r.p99Ns).padStart(12);
+        const ops = r.opsPerSec.toLocaleString(undefined, { maximumFractionDigits: 0 }).padStart(14);
+        const cv = r.cv.toFixed(1).padStart(8);
+        const gc = String(r.gcCount).padStart(4);
+        console.log(`│ ${label} │ ${median} │ ${mean} │ ${p95} │ ${p99} │ ${ops} │ ${cv} │ ${gc} │`);
+    }
+    
+    console.log('└────────────────────────────────────────────────────┴──────────────┴──────────────┴──────────────┴──────────────┴────────────────┴──────────┴────────┘');
+    console.log(`  Clock: hrtime.bigint  Overhead: ${getOverhead()} ns  Batch: ${results.length}`);
+}
 
-    console.log(`\n── COMPARE: ${labelA} vs ${labelB} ──`);
-    console.log(`  ${labelA}:`.padEnd(50) + ` ${toMs(a.medianNs)} median, ${formatOps(a.opsPerSec)} ops/sec`);
-    console.log(`  ${labelB}:`.padEnd(50) + ` ${toMs(b.medianNs)} median, ${formatOps(b.opsPerSec)} ops/sec`);
-    console.log(`  Ratio: ${isFinite(ratio) ? ratio.toFixed(3) : '?'}x ${ratio > 1 ? '(slower)' : '(faster)'}`);
-    console.log(`  Overhead: ${oh.toFixed(0)} ns/sample`);
+function formatNs(ns: number): string {
+    if (ns < 1000) return `${ns.toFixed(1)} ns`;
+    if (ns < 1_000_000) return `${(ns / 1000).toFixed(2)} μs`;
+    if (ns < 1_000_000_000) return `${(ns / 1_000_000).toFixed(2)} ms`;
+    return `${(ns / 1_000_000_000).toFixed(2)} s`;
+}
 
-    return { a, b, ratio };
+export function printCompare(c: CompareResult): void {
+    console.log('\n── COMPARE: ' + c.labelA + ' vs ' + c.labelB + ' ──');
+    console.log(`  ${c.labelA}:`.padEnd(40) + ` ${formatNs(c.medianA).padStart(12)} median, ${(1e9 / c.medianA).toLocaleString()} ops/sec`);
+    console.log(`  ${c.labelB}:`.padEnd(40) + ` ${formatNs(c.medianB).padStart(12)} median, ${(1e9 / c.medianB).toLocaleString()} ops/sec`);
+    console.log(`  Ratio: ${c.ratio.toFixed(3)}x (${c.faster === 'A' ? 'A faster' : 'B faster'})`);
+    console.log(`  Overhead: ${c.overheadNs} ns/sample`);
+}
+
+export const TARGETS: Record<string, number> = {
+    'signal:read': 50,
+    'signal:set_1_effect': 200,
+    'signal:set_10_effects': 500,
+    'signal:set_100_effects': 10_000,
+    'signal:set_1000_effects': 100_000,
+    'batch:10_sets_1_effect': 5_000,
+    'batch:100_sets_1_effect': 10_000,
+    'batch:1k_dirty': 1_000_000,
+    'fan_out_100': 50_000,
+    'fan_out_1000': 500_000,
+    'computed:1_level': 200,
+    'computed:3_level': 500,
+    'computed:5_level': 1_000,
+    'compute:markSignalDirty': 50,
+    'compute:propagateDirty_chain': 500,
+    'compute:propagateDirty_fanout': 500,
+    'compute:executeDirtyEffects': 1_000_000,
+    'compute:full_frame_fanout': 2_000_000,
+    'layout:runLayout': 1_000_000,
+    'render:buildGraph': 500_000,
+    'render:gpu_submit': 200_000,
+    'scheduler:frame': 4_167_000,
+};
+
+export function checkTargets(results: BenchResult[]): { passed: string[]; failed: string[] } {
+    const passed: string[] = [];
+    const failed: string[] = [];
+    
+    for (const r of results) {
+        const target = TARGETS[r.label];
+        if (target && r.medianNs <= target) {
+            passed.push(`${r.label}: ${formatNs(r.medianNs)} ≤ ${formatNs(target)}`);
+        } else if (target) {
+            failed.push(`${r.label}: ${formatNs(r.medianNs)} > ${formatNs(target)} (${((r.medianNs / target - 1) * 100).toFixed(0)}% over)`);
+        }
+    }
+    
+    return { passed, failed };
+}
+
+export function assertTargets(results: BenchResult[], tolerance = 1.1): void {
+    const { passed, failed } = checkTargets(results);
+    
+    if (passed.length) {
+        console.log('\n✅ TARGETS MET:');
+        for (const p of passed) console.log('  ' + p);
+    }
+    
+    if (failed.length) {
+        console.log('\n❌ TARGETS MISSED:');
+        for (const f of failed) console.log('  ' + f);
+        throw new Error(`Performance regression: ${failed.length} targets missed`);
+    }
+}
+
+export interface ProfileSuite {
+    name: string;
+    setup?: () => void;
+    teardown?: () => void;
+    benches: Array<{
+        label: string;
+        fn: () => void;
+        opts?: BenchOptions;
+    }>;
+    compares?: Array<{
+        labelA: string;
+        fnA: () => void;
+        labelB: string;
+        fnB: () => void;
+        opts?: BenchOptions;
+    }>;
+}
+
+const _suites: ProfileSuite[] = [];
+
+export function defineSuite(suite: ProfileSuite): void {
+    _suites.push(suite);
+}
+
+export function getSuites(): ProfileSuite[] {
+    return _suites;
+}
+
+export async function runAllSuites(opts: { 
+    filter?: string; 
+    checkTargets?: boolean;
+    tolerance?: number;
+} = {}): Promise<BenchResult[]> {
+    const allResults: BenchResult[] = [];
+    
+    for (const suite of _suites) {
+        if (opts.filter && !suite.name.includes(opts.filter)) continue;
+        
+        console.log(`\n=== ${suite.name} ===`);
+        
+        if (suite.setup) suite.setup();
+        
+        const suiteResults: BenchResult[] = [];
+        
+        for (const b of suite.benches) {
+            const r = bench(b.label, b.fn, b.opts);
+            suiteResults.push(r);
+            allResults.push(r);
+        }
+        
+        if (suite.compares) {
+            for (const c of suite.compares) {
+                const cr = compare(c.labelA, c.fnA, c.labelB, c.fnB, c.opts);
+                printCompare(cr);
+            }
+        }
+        
+        if (suite.teardown) suite.teardown();
+        
+        if (opts.checkTargets !== false) {
+            const { passed, failed } = checkTargets(suiteResults);
+            if (passed.length) console.log('\n✅ ' + passed.length + ' targets met');
+            if (failed.length) console.log('\n❌ ' + failed.length + ' targets missed');
+        }
+    }
+    
+    return allResults;
+}
+
+export function createV8TraceCommand(): string {
+    return 'NODE_OPTIONS="--trace-deopt --trace-opt --trace-ic --trace-gc" npx vitest run';
+}
+
+export function getV8TraceFilters(): string[] {
+    return [
+        'grep "deopt" v8-trace.log | grep -i dominator',
+        'grep "megamorphic" v8-trace.log',
+        'grep "polymorphic" v8-trace.log',
+        'grep "monomorphic" v8-trace.log',
+        'grep "runtime call stats" v8-trace.log',
+        'grep "GC" v8-trace.log | head -20',
+    ];
+}
+
+export function printV8TraceGuide(): void {
+    console.log('\n=== V8 DEOPT ANALYSIS ===');
+    console.log('Run:');
+    console.log('  ' + createV8TraceCommand());
+    console.log('\nThen check v8-trace.log for:');
+    getV8TraceFilters().forEach(f => console.log('  ' + f));
+}
+
+export function createRegressionGate(baseline: Record<string, number>, tolerance = 1.1): (results: BenchResult[]) => void {
+    return (results: BenchResult[]) => {
+        const failures: string[] = [];
+        
+        for (const r of results) {
+            const base = baseline[r.label];
+            if (base && r.medianNs > base * tolerance) {
+                failures.push(`${r.label}: ${formatNs(r.medianNs)} > ${formatNs(base * tolerance)} (baseline: ${formatNs(base)})`);
+            }
+        }
+        
+        if (failures.length) {
+            console.log('\n🚨 REGRESSION DETECTED:');
+            failures.forEach(f => console.log('  ' + f));
+            throw new Error('Performance regression detected');
+        }
+    };
 }

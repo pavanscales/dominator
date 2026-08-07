@@ -96,6 +96,7 @@ export interface CodegenOptions {
     functionName?: string;
     stateImportPath?: string;
     aggressive?: boolean; // New flag for maximum aggression mode
+    suppressDestructuring?: boolean; // Suppress destructuring to preserve state.methodName() syntax
 }
 
 function _hasInlineEvents(instrs: Instruction[]): boolean {
@@ -116,6 +117,7 @@ export const codegen = (instructions: Instruction[], options: CodegenOptions | s
     const functionName = opts.functionName ?? 'render';
     const stateImportPath = opts.stateImportPath ?? '../state';
     const aggressive = opts.aggressive ?? false; // Get aggressive flag
+    const suppressDestructuring = opts.suppressDestructuring ?? false; // Get suppress destructuring flag
 
     const parts: string[] = [];
     const idents = _collectIdentifiers(instructions);
@@ -127,7 +129,7 @@ export const codegen = (instructions: Instruction[], options: CodegenOptions | s
     }
     parts.push(`export const ${functionName} = () => {\n`);
     parts.push('  const state = stateModule;\n');
-    if (idents.length > 0) {
+    if (idents.length > 0 && !suppressDestructuring) {
         parts.push(`  const { ${idents.join(', ')} } = state;\n\n`);
     } else {
         parts.push('\n');

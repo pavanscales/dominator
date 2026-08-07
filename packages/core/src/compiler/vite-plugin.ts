@@ -25,7 +25,7 @@ let _wasmBuilt = false;
 function buildZigWasm(zigDir: string): void {
     if (_wasmBuilt) return;
     try {
-        const distDir = path.resolve(zigDir, '../dist/zig');
+        const distDir = path.resolve(zigDir, '../../dist/zig');
         execSync(`mkdir -p "${distDir}"`, { stdio: 'pipe' });
 
         // Build core module (must match root build:wasm script — freestanding + wasm-ld)
@@ -62,10 +62,10 @@ export function dominatorPlugin(options: DominatorPluginOptions = {}) {
     return {
         name: 'vite-plugin-dominator',
 
-        // Build Zig WASM modules on server start
+// Build Zig WASM modules on server start
         buildStart() {
             if (buildWasm) {
-                const zigDir = path.resolve(__dirname, '../src/zig');
+                const zigDir = path.resolve(__dirname, '../../src/zig');
                 buildZigWasm(zigDir);
             }
         },
