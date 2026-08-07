@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { signal, effect, batch, _resetSignals } from '../signal';
+import { signal, effect, batch, _resetSignals } from '../reactive/signal';
 import { calibrate, toMs, formatOps, getClockName } from './measurement';
 import { bench, report, benchScale, reportScale, compare } from './microbench';
 import { probeMegamorphic, logICState, megamorphicWarning, v8DeoptSummary } from './v8-diag';
