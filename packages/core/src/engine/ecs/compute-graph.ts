@@ -437,7 +437,7 @@ export function propagateDirty(): number {
     const outData = g.outData;
     const dirty = g.dirty;
 
-    while (_bfsHead < _bfsTail) {
+    while (_bfsHead < _bfsTail && _allDirtyCount < _dirtyNodeCap) {
         const remaining = _bfsTail - _bfsHead;
         const batchSize = remaining < 4 ? remaining : 4;
 

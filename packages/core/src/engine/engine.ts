@@ -32,28 +32,28 @@
  * Frame arenas reset per stage: zero GC in hot path.
  */
 
-import { createWorld, getWorld, Flag, getDirtyEntityCount, clearDirtyFlags, destroyWorld, type ECSWorld } from './ecs';
-import { createGraph, getGraph, getNodesByStage, getStageNodeCount, clearDirty, propagateDirty, executeDirtyEffects, destroyGraph, STAGE_SIGNAL, STAGE_EFFECT, STAGE_LAYOUT, STAGE_ANIMATION, STAGE_TEXT, STAGE_VISIBILITY, STAGE_PAINT, STAGE_GPU, type ComputeGraph } from './compute-graph';
+import { createWorld, getWorld, Flag, getDirtyEntityCount, clearDirtyFlags, destroyWorld, type ECSWorld } from './ecs/ecs';
+import { createGraph, getGraph, getNodesByStage, getStageNodeCount, clearDirty, propagateDirty, executeDirtyEffects, destroyGraph, STAGE_SIGNAL, STAGE_EFFECT, STAGE_LAYOUT, STAGE_ANIMATION, STAGE_TEXT, STAGE_VISIBILITY, STAGE_PAINT, STAGE_GPU, type ComputeGraph } from './ecs/compute-graph';
 import { logError } from '../logging';
 import {
     createScheduler, getScheduler, registerStage, startScheduler, stopScheduler,
     tickSync, setStageBudget, type FrameScheduler, type FrameStats, Stage, Degrade,
-} from './frame-scheduler';
-import { runLayout, resetLayoutConfig, LayoutMode, FlexDirection, JustifyContent, AlignItems } from './layout';
-import { buildRenderGraph, optimizeCommands, resetRenderGraph, freezeCommandBuffer, type RenderGraph } from './render-graph';
+} from './scheduler/frame-scheduler';
+import { runLayout, resetLayoutConfig, LayoutMode, FlexDirection, JustifyContent, AlignItems } from './render/layout';
+import { buildRenderGraph, optimizeCommands, resetRenderGraph, freezeCommandBuffer, isRenderGraphDegraded, type RenderGraph } from './render/render-graph';
 import {
     createRenderer, createRendererAsync, RendererType,
     type Renderer, type RendererOptions,
-} from './renderer';
+} from './render/renderer';
 import { createArena, getArena, arenaFrameReset,
     arenaResetLayout, arenaResetCommand,
     destroyArena, type FrameArena,
-} from './arena';
+} from './ecs/arena';
 import {
     createJobScheduler, getJobScheduler, submitJob, drainJobs,
     waitForAll, resetJobScheduler, destroyJobScheduler,
     type JobScheduler,
-} from './job-scheduler';
+} from './scheduler/job-scheduler';
 import {
     createProfiler, getProfiler, recordFrame, setBaseline,
     checkRegression, formatReport, assertNoRegression,
@@ -61,15 +61,15 @@ import {
 } from './profiler';
 import {
     getAnimationState, runAnimationStage, resetAnimationStage, destroyAnimationState,
-} from './animation';
+} from './animation/animation';
 import {
     runTextLayoutStage, resetTextStore,
-} from './text';
+} from './render/text';
 import {
     getVisibilitySystem, runVisibilityStage, setViewport, resetVisibilitySystem,
-} from './visibility';
-import type { WorkerPool } from './worker-pool';
-import { createWorkerPool, destroyWorkerPool } from './worker-pool';
+} from './render/visibility';
+import type { WorkerPool } from './scheduler/worker-pool';
+import { createWorkerPool, destroyWorkerPool } from './scheduler/worker-pool';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // COMPUTE GRAPH → SIGNAL SYSTEM BRIDGE
@@ -316,10 +316,15 @@ function _wireScheduler(
     });
 
     // ── Stage 7: PAINT (1.0ms) — render graph command generation ──
-    registerStage(Stage.PAINT, (_budget, stats, degrade) => {
+registerStage(Stage.PAINT, (_budget, stats, degrade) => {
         const rg = buildRenderGraph(degrade);
         stats.paintNodes = rg.commandCount;
         stats.gpuCommands = rg.commandCount;
+        // Surface render-graph buffer overflow so the scheduler degrades
+        // early next frame (proactive, not reactive to a torn frame).
+        if (isRenderGraphDegraded()) {
+            stats.degradeLevel = 3;
+        }
         return true;
     });
 
@@ -428,7 +433,7 @@ import {
     STYLE_PL, STYLE_PR, STYLE_PT, STYLE_PB,
     STYLE_ML, STYLE_MR, STYLE_MT, STYLE_MB,
     STYLE_OPACITY, STYLE_BORDER_RADIUS, STYLE_BORDER_WIDTH,
-} from './ecs';
+} from './ecs/ecs';
 
 export function createEntity(parentId?: number): number {
     const e = getEngine();
@@ -509,42 +514,42 @@ export function setEntityStyle(
 // ANIMATION API
 // ═══════════════════════════════════════════════════════════════════════════
 
-export { addTween, addSpring, TimingFn, AnimType } from './animation';
+export { addTween, addSpring, TimingFn, AnimType } from './animation/animation';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TEXT API
 // ═══════════════════════════════════════════════════════════════════════════
 
-export { setText, setFont, setTextColor } from './text';
+export { setText, setFont, setTextColor } from './render/text';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RE-EXPORTS
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ECS
-export { Flag, STYLE_X, STYLE_Y, STYLE_W, STYLE_H, STYLE_PL, STYLE_PR, STYLE_PT, STYLE_PB, STYLE_ML, STYLE_MR, STYLE_MT, STYLE_MB, STYLE_OPACITY, STYLE_BORDER_RADIUS, STYLE_BORDER_WIDTH, STYLE_FLOATS_PER_ENTITY, LAYOUT_X, LAYOUT_Y, LAYOUT_W, LAYOUT_H, LAYOUT_FLOATS_PER_ENTITY, getDirtyEntityCount } from './ecs';
-export type { ECSWorld, StyleStore, LayoutStore, RenderStore, EventStore } from './ecs';
+export { Flag, STYLE_X, STYLE_Y, STYLE_W, STYLE_H, STYLE_PL, STYLE_PR, STYLE_PT, STYLE_PB, STYLE_ML, STYLE_MR, STYLE_MT, STYLE_MB, STYLE_OPACITY, STYLE_BORDER_RADIUS, STYLE_BORDER_WIDTH, STYLE_FLOATS_PER_ENTITY, LAYOUT_X, LAYOUT_Y, LAYOUT_W, LAYOUT_H, LAYOUT_FLOATS_PER_ENTITY, getDirtyEntityCount } from './ecs/ecs';
+export type { ECSWorld, StyleStore, LayoutStore, RenderStore, EventStore } from './ecs/ecs';
 
 // Compute Graph
-export { GraphNodeType, STAGE_SIGNAL, STAGE_EFFECT, STAGE_LAYOUT, STAGE_ANIMATION, STAGE_TEXT, STAGE_VISIBILITY, STAGE_PAINT, STAGE_GPU } from './compute-graph';
+export { GraphNodeType, STAGE_SIGNAL, STAGE_EFFECT, STAGE_LAYOUT, STAGE_ANIMATION, STAGE_TEXT, STAGE_VISIBILITY, STAGE_PAINT, STAGE_GPU } from './ecs/compute-graph';
 
 // Layout
-export { LayoutMode, FlexDirection, JustifyContent, AlignItems, setLayoutMode, setFlexDirection, setJustifyContent, setAlignItems } from './layout';
+export { LayoutMode, FlexDirection, JustifyContent, AlignItems, setLayoutMode, setFlexDirection, setJustifyContent, setAlignItems } from './render/layout';
 
 // Render Graph
-export { CmdType } from './render-graph';
+export { CmdType } from './render/render-graph';
 
 // Job Scheduler
-export { JobType, registerJobCallback, submitJobBatch, drainJobsByType, waitForType, getSharedBuffer, getJobTypeName } from './job-scheduler';
+export { JobType, registerJobCallback, submitJobBatch, drainJobsByType, waitForType, getSharedBuffer, getJobTypeName } from './scheduler/job-scheduler';
 
 // Worker Pool
 export {
     createWorkerPool, submitToPool, submitBatchToPool,
     waitForPool, isPoolIdle, registerPoolCallback,
     destroyWorkerPool, getWorkerPool, getPoolStats,
-} from './worker-pool';
-export type { WorkerPool } from './worker-pool';
+} from './scheduler/worker-pool';
+export type { WorkerPool } from './scheduler/worker-pool';
 
 // Renderer
-export { DOMRenderer, CanvasRenderer, WebGPURenderer } from './renderer';
-export type { RendererOptions } from './renderer';
+export { DOMRenderer, CanvasRenderer, WebGPURenderer } from './render/renderer';
+export type { RendererOptions } from './render/renderer';
