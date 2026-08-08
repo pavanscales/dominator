@@ -826,9 +826,10 @@ export function forEachDescendant(entityId: number, fn: (id: number, depth: numb
 // ═══════════════════════════════════════════════════════════════════════════
 
 export function getDirtyEntities(): Int32Array {
-    // Return a copy: the caller owns it, so mutating it cannot corrupt the
-    // internal dirty list (a live view would be a footgun for public API).
-    return _dirtyList.slice(0, _dirtyCount);
+    // Return a view (subarray) — zero allocation. Callers must not mutate
+    // the returned array, and must not hold it across clearDirtyFlags()
+    // since the internal list is reset each frame.
+    return _dirtyList.subarray(0, _dirtyCount);
 }
 
 export function getDirtyEntityCount(): number {
